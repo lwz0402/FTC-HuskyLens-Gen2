@@ -6,104 +6,144 @@ import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.Servo;
 
 import org.firstinspires.ftc.teamcode.huskylens.HuskyLens2;
-import org.firstinspires.ftc.teamcode.huskylens.HuskyLens2.*;
+import org.firstinspires.ftc.teamcode.huskylens.HuskyLens2.Algorithm;
+import org.firstinspires.ftc.teamcode.huskylens.HuskyLens2.Block;
 
 import java.util.List;
 
 /**
- * HuskyLensTagTracker demonstrates a practical use case:
- * 1. Recognizes AprilTags (Tag Recognition).
- * 2. Uses a Servo to rotate the camera/mechanism to center the Tag.
- * 3. Once centered, activates a motor to "shoot".
+ * Practical AprilTag example for HuskyLens Gen2:
+ * 1. Switch HuskyLens to Tag Recognition.
+ * 2. Pick the detected tag closest to the optical center.
+ * 3. Pan a servo until the tag is centered.
+ * 4. Only run the shooter after the target has stayed centered for a few frames.
  */
-@TeleOp(name = "HuskyLens: Tag Tracker & Shooter", group = "Practical")
+@TeleOp(name = "HuskyLens Gen2: AprilTag Tracker", group = "Practical")
 public class HuskyLens2TagTracker extends LinearOpMode {
 
-    // Hardware components
+    private static final double SERVO_CENTER = 0.50;
+    private static final double SERVO_STEP = 0.005;
+    private static final double SERVO_MIN = 0.00;
+    private static final double SERVO_MAX = 1.00;
+    private static final double PAN_ERROR_TO_SERVO_SIGN = -1.0;
+
+    private static final int CAMERA_CENTER_X = HuskyLens2.FRAME_WIDTH / 2;
+    private static final int CENTER_THRESHOLD_PX = 20;
+    private static final int LOCK_CONFIRMATION_FRAMES = 3;
+    private static final double SHOOTER_POWER = 1.0;
+    private static final long LOOP_DELAY_MS = 40;
+
     private HuskyLens2 huskyLens;
     private Servo turretServo;
     private DcMotor shooterMotor;
 
-    // Configuration constants
-    private static final double SERVO_CENTER = 0.5;
-    private static final double SERVO_STEP = 0.005; // Adjust for speed of tracking
-    private static final int HUSKY_CENTER_X = 160;   // HuskyLens Gen2 default center is 160 (320/2)
-    private static final int CENTER_THRESHOLD = 10;  // Allowed error in pixels
-
     @Override
     public void runOpMode() {
-        // Initialize Hardware
         huskyLens = hardwareMap.get(HuskyLens2.class, "huskylens");
         turretServo = hardwareMap.get(Servo.class, "turretServo");
         shooterMotor = hardwareMap.get(DcMotor.class, "shooterMotor");
 
         double servoPosition = SERVO_CENTER;
-        turretServo.setPosition(servoPosition);
+        int lockedFrames = 0;
 
-        telemetry.addData("Status", "Initializing HuskyLens...");
+        turretServo.setPosition(servoPosition);
+        shooterMotor.setPower(0.0);
+
+        telemetry.addData("Status", "Connecting to HuskyLens Gen2...");
         telemetry.update();
 
-        // 1. Setup HuskyLens for Tag Recognition
         if (!huskyLens.knock()) {
-            telemetry.addData("Error", "HuskyLens disconnected!");
+            telemetry.addData("Error", "HuskyLens Gen2 is not responding on I2C.");
             telemetry.update();
+            return;
         }
-        huskyLens.selectAlgorithm(Algorithm.ALGORITHM_TAG_RECOGNITION);
 
-        telemetry.addData("Status", "Ready. Tracking AprilTags...");
+        if (!huskyLens.selectAlgorithm(Algorithm.ALGORITHM_TAG_RECOGNITION)) {
+            telemetry.addData("Error", "Failed to switch HuskyLens to Tag Recognition.");
+            telemetry.update();
+            return;
+        }
+
+        telemetry.addData("Status", "Ready for AprilTag tracking");
+        telemetry.addData("Camera Center X", CAMERA_CENTER_X);
         telemetry.update();
 
         waitForStart();
 
         while (opModeIsActive()) {
-            // 2. Request Tag detections
             List<Block> tags = huskyLens.requestBlocks(Algorithm.ALGORITHM_TAG_RECOGNITION);
-            
-            if (!tags.isEmpty()) {
-                // Focus on the first detected tag
-                Block targetTag = tags.get(0);
-                int errorX = targetTag.xCenter - HUSKY_CENTER_X;
+            Block targetTag = chooseClosestToCenter(tags);
 
+            if (targetTag == null) {
+                lockedFrames = 0;
+                shooterMotor.setPower(0.0);
+                telemetry.addData("Mode", "Searching");
+            } else {
+                int errorX = targetTag.xCenter - CAMERA_CENTER_X;
                 telemetry.addData("Tag ID", targetTag.id);
+                telemetry.addData("Tag Name", emptyAsDash(targetTag.name));
+                telemetry.addData("Tag Content", emptyAsDash(targetTag.content));
+                telemetry.addData("Tag Center", "%d, %d", targetTag.xCenter, targetTag.yCenter);
+                telemetry.addData("Tag Size", "%d x %d", targetTag.width, targetTag.height);
                 telemetry.addData("Error X", errorX);
 
-                // 3. Rotate Servo to center the Tag
-                if (Math.abs(errorX) > CENTER_THRESHOLD) {
-                    // If tag is to the right (error > 0), decrease servo pos to turn left (depending on mounting)
-                    // If tag is to the left (error < 0), increase servo pos to turn right
-                    if (errorX > 0) {
-                        servoPosition -= SERVO_STEP;
-                    } else {
-                        servoPosition += SERVO_STEP;
-                    }
-                    
-                    // Clamp servo position between 0 and 1
-                    servoPosition = Math.max(0, Math.min(1, servoPosition));
+                if (Math.abs(errorX) > CENTER_THRESHOLD_PX) {
+                    lockedFrames = 0;
+                    servoPosition = clip(
+                            servoPosition + (PAN_ERROR_TO_SERVO_SIGN * Math.signum(errorX) * SERVO_STEP),
+                            SERVO_MIN,
+                            SERVO_MAX
+                    );
                     turretServo.setPosition(servoPosition);
-                    
-                    shooterMotor.setPower(0); // Don't shoot while moving
-                    telemetry.addData("Mode", "Centering...");
+                    shooterMotor.setPower(0.0);
+                    telemetry.addData("Mode", "Centering");
                 } else {
-                    // 4. Centered! Turn on the motor to "shoot"
-                    telemetry.addData("Mode", "LOCKED! SHOOTING!");
-                    shooterMotor.setPower(1.0);
-                    // Optional: Take a photo of the "hit"
-                    // huskyLens.takePhoto(HuskyLens2.RESOLUTION_DEFAULT);
+                    lockedFrames++;
+                    if (lockedFrames >= LOCK_CONFIRMATION_FRAMES) {
+                        shooterMotor.setPower(SHOOTER_POWER);
+                        telemetry.addData("Mode", "Locked and shooting");
+                    } else {
+                        shooterMotor.setPower(0.0);
+                        telemetry.addData("Mode", "Locking");
+                    }
                 }
-            } else {
-                telemetry.addData("Mode", "Searching for Tag...");
-                shooterMotor.setPower(0);
             }
 
-            telemetry.addData("Servo Pos", "%.3f", servoPosition);
+            telemetry.addData("Detected Tags", tags.size());
+            telemetry.addData("Locked Frames", lockedFrames);
+            telemetry.addData("Servo Position", "%.3f", servoPosition);
+            telemetry.addData("Threshold Px", CENTER_THRESHOLD_PX);
             telemetry.update();
-            
-            // Short delay to prevent overwhelming the I2C bus
-            sleep(20);
+
+            sleep(LOOP_DELAY_MS);
         }
-        
-        // Cleanup
-        shooterMotor.setPower(0);
+
+        shooterMotor.setPower(0.0);
         huskyLens.exit();
+    }
+
+    private Block chooseClosestToCenter(List<Block> tags) {
+        Block best = null;
+        int bestDistance = Integer.MAX_VALUE;
+        int bestArea = -1;
+
+        for (Block tag : tags) {
+            int distance = Math.abs(tag.xCenter - CAMERA_CENTER_X);
+            int area = tag.width * tag.height;
+            if (best == null || distance < bestDistance || (distance == bestDistance && area > bestArea)) {
+                best = tag;
+                bestDistance = distance;
+                bestArea = area;
+            }
+        }
+        return best;
+    }
+
+    private double clip(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private String emptyAsDash(String value) {
+        return value == null || value.isEmpty() ? "-" : value;
     }
 }

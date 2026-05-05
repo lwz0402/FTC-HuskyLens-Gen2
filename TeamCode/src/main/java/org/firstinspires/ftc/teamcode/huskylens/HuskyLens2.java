@@ -7,20 +7,24 @@ import com.qualcomm.robotcore.hardware.configuration.annotations.DevicePropertie
 import com.qualcomm.robotcore.hardware.configuration.annotations.I2cDeviceType;
 import com.qualcomm.robotcore.util.TypeConversion;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
 @I2cDeviceType
-@DeviceProperties(name = "HuskyLens Gen2", description = "DFRobot HuskyLens Gen2 AI Camera", xmlTag = "HuskyLens2")
+@DeviceProperties(
+        name = "HuskyLens Gen2",
+        description = "DFRobot HuskyLens Gen2 AI Camera",
+        xmlTag = "HuskyLens2"
+)
 public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
 
     public static final I2cAddr DEFAULT_ADDRESS = I2cAddr.create7bit(0x50);
 
-    private static final int HEADER_0 = 0x55;
-    private static final int HEADER_1 = 0xAA;
-
-    // --- Constants ---
+    public static final int FRAME_WIDTH = 640;
+    public static final int FRAME_HEIGHT = 480;
 
     public static final int RESOLUTION_DEFAULT = 0;
     public static final int RESOLUTION_640x480 = 1;
@@ -48,7 +52,13 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
     public static final int COLOR_INDIGO = 0x4B0082;
     public static final int COLOR_MAGENTA = 0xFF00FF;
 
-    // --- Data Models and Enums ---
+    private static final int HEADER_0 = 0x55;
+    private static final int HEADER_1 = 0xAA;
+    private static final int FIXED_DATA_BYTES = 10;
+    private static final int MAX_MULTI_ALGORITHMS = 3;
+    private static final int RETRY_COUNT = 3;
+    private static final int RESPONSE_TIMEOUT_MS = 250;
+    private static final int RESPONSE_POLL_INTERVAL_MS = 20;
 
     public enum Algorithm {
         ALGORITHM_ANY(0),
@@ -73,9 +83,17 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         ALGORITHM_FALLDOWN_RECOGNITION(19);
 
         public final int id;
-        Algorithm(int id) { this.id = id; }
+
+        Algorithm(int id) {
+            this.id = id;
+        }
+
         public static Algorithm fromId(int id) {
-            for (Algorithm a : values()) { if (a.id == id) return a; }
+            for (Algorithm algorithm : values()) {
+                if (algorithm.id == id) {
+                    return algorithm;
+                }
+            }
             return ALGORITHM_ANY;
         }
     }
@@ -101,7 +119,7 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         COMMAND_ACTION_SAVE_KNOWLEDGES(0x24),
         COMMAND_ACTION_LOAD_KNOWLEDGES(0x25),
         COMMAND_ACTION_DRAW_RECT(0x26),
-        COMMAND_ACTION_CLEAN_RECT(0x27),
+        COMMAND_ACTION_CLEAR_RECT(0x27),
         COMMAND_ACTION_DRAW_TEXT(0x28),
         COMMAND_ACTION_CLEAR_TEXT(0x29),
         COMMAND_ACTION_PLAY_MUSIC(0x2A),
@@ -112,32 +130,37 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         COMMAND_ACTION_STOP_RECORDING(0x2F);
 
         public final int id;
-        Command(int id) { this.id = id; }
-        public static Command fromId(int id) {
-            for (Command c : values()) { if (c.id == id) return c; }
-            return null;
+
+        Command(int id) {
+            this.id = id;
         }
     }
 
     public static class Block {
         public int id;
+        public int algorithmId;
+        public Algorithm algorithm = Algorithm.ALGORITHM_ANY;
         public int xCenter;
         public int yCenter;
         public int width;
         public int height;
-        public String name;
-        public String content;
-        public byte[] privateData;
+        public String name = "";
+        public String content = "";
+        public byte[] privateData = new byte[0];
 
         @Override
         public String toString() {
-            return String.format(Locale.US, "Block(id=%d, x=%d, y=%d, w=%d, h=%d, name=%s, content=%s)",
-                    id, xCenter, yCenter, width, height, name, content);
+            return String.format(
+                    Locale.US,
+                    "Block(id=%d, algo=%s, x=%d, y=%d, w=%d, h=%d, name=%s, content=%s)",
+                    id, algorithm, xCenter, yCenter, width, height, name, content
+            );
         }
     }
 
     public static class Arrow {
         public int id;
+        public int level;
         public int xTarget;
         public int yTarget;
         public int angle;
@@ -145,8 +168,11 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
 
         @Override
         public String toString() {
-            return String.format(Locale.US, "Arrow(id=%d, x=%d, y=%d, angle=%d, len=%d)",
-                    id, xTarget, yTarget, angle, length);
+            return String.format(
+                    Locale.US,
+                    "Arrow(id=%d, level=%d, x=%d, y=%d, angle=%d, len=%d)",
+                    id, level, xTarget, yTarget, angle, length
+            );
         }
     }
 
@@ -159,12 +185,27 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
 
         @Override
         public String toString() {
-            return String.format(Locale.US, "Info(maxID=%d, totalResults=%d, learned=%d, blocks=%d, blocksLearned=%d)",
-                    maxID, totalResults, totalResultsLearned, totalBlocks, totalBlocksLearned);
+            return String.format(
+                    Locale.US,
+                    "Info(maxID=%d, totalResults=%d, learned=%d, blocks=%d, blocksLearned=%d)",
+                    maxID, totalResults, totalResultsLearned, totalBlocks, totalBlocksLearned
+            );
         }
     }
 
-    // --- Core Functionality ---
+    private static final class ArgsResponse {
+        final int totalIntArgs;
+        final boolean success;
+        final int[] intArgs;
+        final List<String> stringArgs;
+
+        ArgsResponse(int totalIntArgs, boolean success, int[] intArgs, List<String> stringArgs) {
+            this.totalIntArgs = totalIntArgs;
+            this.success = success;
+            this.intArgs = intArgs;
+            this.stringArgs = stringArgs;
+        }
+    }
 
     public HuskyLens2(I2cDeviceSynch deviceSynch) {
         super(deviceSynch, true);
@@ -189,42 +230,38 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
     }
 
     public boolean knock() {
-        byte[] payload = new byte[10];
-        payload[0] = 0x01; // Large RAM
-        byte[] command = buildPacket(Command.COMMAND_KNOCK, Algorithm.ALGORITHM_ANY, payload);
-        deviceClient.write(command);
-        
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        if (response != null && response.length >= 2) {
-            return response[1] == 0; // Success
+        byte[] payload = new byte[FIXED_DATA_BYTES];
+        payload[0] = 0x01;
+        return isSuccessful(sendCommand(Command.COMMAND_KNOCK, Algorithm.ALGORITHM_ANY, payload));
+    }
+
+    public boolean switchAlgorithm(Algorithm algorithm) {
+        return selectAlgorithm(algorithm);
+    }
+
+    public boolean selectAlgorithm(Algorithm algorithm) {
+        return selectAlgorithm(algorithm.id);
+    }
+
+    public boolean selectAlgorithm(int algorithmId) {
+        byte[] payload = new byte[FIXED_DATA_BYTES];
+        payload[0] = (byte) algorithmId;
+        return isSuccessful(sendCommand(Command.COMMAND_SET_ALGORITHM, Algorithm.ALGORITHM_ANY, payload));
+    }
+
+    public Info requestInfo(Algorithm algorithm) {
+        return getInfo(algorithm);
+    }
+
+    public List<Block> requestBlocks(Algorithm algorithm) {
+        Info info = getInfo(algorithm);
+        if (info == null || info.totalBlocks <= 0) {
+            return Collections.emptyList();
         }
-        return false;
-    }
 
-    public boolean selectAlgorithm(Algorithm algo) {
-        return selectAlgorithm(algo.id);
-    }
-
-    public boolean selectAlgorithm(int algoId) {
-        byte[] payload = new byte[10];
-        payload[0] = (byte) algoId;
-        byte[] command = buildPacket(Command.COMMAND_SET_ALGORITHM, Algorithm.ALGORITHM_ANY, payload);
-        deviceClient.write(command);
-
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        if (response != null && response.length >= 2) {
-            return response[1] == 0;
-        }
-        return false;
-    }
-
-    public List<Block> requestBlocks(Algorithm algo) {
-        Info info = getInfo(algo);
-        List<Block> blocks = new ArrayList<>();
-        if (info == null) return blocks;
-
+        List<Block> blocks = new ArrayList<>(info.totalBlocks);
         for (int i = 0; i < info.totalBlocks; i++) {
-            byte[] blockData = receivePacket(Command.COMMAND_RETURN_BLOCK);
+            byte[] blockData = waitForPacket(Command.COMMAND_RETURN_BLOCK);
             if (blockData != null) {
                 blocks.add(parseBlock(blockData));
             }
@@ -232,13 +269,16 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         return blocks;
     }
 
-    public List<Arrow> requestArrows(Algorithm algo) {
-        Info info = getInfo(algo);
-        List<Arrow> arrows = new ArrayList<>();
-        if (info == null) return arrows;
+    public List<Arrow> requestArrows(Algorithm algorithm) {
+        Info info = getInfo(algorithm);
+        int arrowCount = info == null ? 0 : Math.max(0, info.totalResults - info.totalBlocks);
+        if (arrowCount <= 0) {
+            return Collections.emptyList();
+        }
 
-        for (int i = 0; i < (info.totalResults - info.totalBlocks); i++) {
-            byte[] arrowData = receivePacket(Command.COMMAND_RETURN_ARROW);
+        List<Arrow> arrows = new ArrayList<>(arrowCount);
+        for (int i = 0; i < arrowCount; i++) {
+            byte[] arrowData = waitForPacket(Command.COMMAND_RETURN_ARROW);
             if (arrowData != null) {
                 arrows.add(parseArrow(arrowData));
             }
@@ -246,71 +286,53 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         return arrows;
     }
 
+    public int learn(Algorithm algorithm) {
+        ArgsResponse response = sendCommand(Command.COMMAND_ACTION_LEARN, algorithm, new byte[0]);
+        return firstIntArg(response);
+    }
+
+    public int learnBlock(Algorithm algorithm, int x, int y, int width, int height) {
+        byte[] payload = new byte[FIXED_DATA_BYTES];
+        writeShortLE(payload, 2, x);
+        writeShortLE(payload, 4, y);
+        writeShortLE(payload, 6, width);
+        writeShortLE(payload, 8, height);
+        ArgsResponse response = sendCommand(Command.COMMAND_ACTION_LEARN_BLOCK, algorithm, payload);
+        return firstIntArg(response);
+    }
+
     public boolean forget() {
-        byte[] command = buildPacket(Command.COMMAND_ACTION_FORGET, Algorithm.ALGORITHM_ANY, new byte[0]);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return response != null && response.length >= 2 && response[1] == 0;
+        return forget(Algorithm.ALGORITHM_ANY);
+    }
+
+    public boolean forget(Algorithm algorithm) {
+        return isSuccessful(sendCommand(Command.COMMAND_ACTION_FORGET, algorithm, new byte[0]));
+    }
+
+    public String takePhoto() {
+        return takePhoto(RESOLUTION_1280x720);
     }
 
     public String takePhoto(int resolution) {
-        byte[] payload = new byte[10];
+        byte[] payload = new byte[FIXED_DATA_BYTES];
         payload[0] = (byte) resolution;
-        byte[] command = buildPacket(Command.COMMAND_ACTION_TAKE_PHOTO, Algorithm.ALGORITHM_ANY, payload);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return parseStringResponse(response);
+        return firstStringArg(sendCommand(Command.COMMAND_ACTION_TAKE_PHOTO, Algorithm.ALGORITHM_ANY, payload));
     }
 
     public String takeScreenshot() {
-        byte[] command = buildPacket(Command.COMMAND_ACTION_TAKE_SCREENSHOT, Algorithm.ALGORITHM_ANY, new byte[0]);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return parseStringResponse(response);
+        return firstStringArg(sendCommand(Command.COMMAND_ACTION_TAKE_SCREENSHOT, Algorithm.ALGORITHM_ANY, new byte[0]));
     }
 
-    public int learn(Algorithm algo) {
-        byte[] command = buildPacket(Command.COMMAND_ACTION_LEARN, algo, new byte[0]);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        if (response != null && response.length >= 4) {
-            return readShortLE(response, 2); // arg0_int
-        }
-        return 0;
-    }
-
-    public int learnBlock(Algorithm algo, int x, int y, int width, int height) {
-        byte[] payload = new byte[10];
-        // payload[0], [1] RFU
-        writeShortLE(payload, 2, (short)x);
-        writeShortLE(payload, 4, (short)y);
-        writeShortLE(payload, 6, (short)width);
-        writeShortLE(payload, 8, (short)height);
-        byte[] command = buildPacket(Command.COMMAND_ACTION_LEARN_BLOCK, algo, payload);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        if (response != null && response.length >= 4) {
-            return readShortLE(response, 2);
-        }
-        return 0;
-    }
-
-    public boolean saveKnowledge(Algorithm algo, int knowledgeId) {
-        byte[] payload = new byte[10];
+    public boolean saveKnowledge(Algorithm algorithm, int knowledgeId) {
+        byte[] payload = new byte[FIXED_DATA_BYTES];
         payload[0] = (byte) knowledgeId;
-        byte[] command = buildPacket(Command.COMMAND_ACTION_SAVE_KNOWLEDGES, algo, payload);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return response != null && response.length >= 2 && response[1] == 0;
+        return isSuccessful(sendCommand(Command.COMMAND_ACTION_SAVE_KNOWLEDGES, algorithm, payload));
     }
 
-    public boolean loadKnowledge(Algorithm algo, int knowledgeId) {
-        byte[] payload = new byte[10];
+    public boolean loadKnowledge(Algorithm algorithm, int knowledgeId) {
+        byte[] payload = new byte[FIXED_DATA_BYTES];
         payload[0] = (byte) knowledgeId;
-        byte[] command = buildPacket(Command.COMMAND_ACTION_LOAD_KNOWLEDGES, algo, payload);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return response != null && response.length >= 2 && response[1] == 0;
+        return isSuccessful(sendCommand(Command.COMMAND_ACTION_LOAD_KNOWLEDGES, algorithm, payload));
     }
 
     public boolean drawRect(int color, int lineWidth, int x, int y, int width, int height) {
@@ -321,219 +343,399 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         return drawRectBase(Command.COMMAND_ACTION_DRAW_UNIQUE_RECT, color, lineWidth, x, y, width, height);
     }
 
-    private boolean drawRectBase(Command cmd, int color, int lineWidth, int x, int y, int width, int height) {
-        byte[] payload = new byte[14];
-        payload[0] = 0; // colorID (legacy/ignored?)
-        payload[1] = (byte) lineWidth;
-        writeShortLE(payload, 2, (short)x);
-        writeShortLE(payload, 4, (short)y);
-        writeShortLE(payload, 6, (short)width);
-        writeShortLE(payload, 8, (short)height);
-        writeShortLE(payload, 10, (short)0); // RFU
-        writeInt32LE(payload, 12, color);
-        byte[] command = buildPacket(cmd, Algorithm.ALGORITHM_ANY, payload);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return response != null && response.length >= 2 && response[1] == 0;
-    }
-
     public boolean clearRect() {
-        byte[] command = buildPacket(Command.COMMAND_ACTION_CLEAN_RECT, Algorithm.ALGORITHM_ANY, new byte[0]);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return response != null && response.length >= 2 && response[1] == 0;
+        return isSuccessful(sendCommand(Command.COMMAND_ACTION_CLEAR_RECT, Algorithm.ALGORITHM_ANY, new byte[0]));
     }
 
     public boolean drawText(int color, int fontSize, int x, int y, String text) {
-        byte[] textBytes = text.getBytes();
-        byte[] payload = new byte[15 + textBytes.length];
+        byte[] textBytes = text.getBytes(StandardCharsets.UTF_8);
+        byte[] payload = new byte[16 + textBytes.length];
         payload[0] = 0;
         payload[1] = (byte) fontSize;
-        writeShortLE(payload, 2, (short)x);
-        writeShortLE(payload, 4, (short)y);
-        // payload 6-9 RFU
+        writeShortLE(payload, 2, x);
+        writeShortLE(payload, 4, y);
+        writeShortLE(payload, 6, 0);
+        writeShortLE(payload, 8, 0);
         payload[10] = (byte) textBytes.length;
         System.arraycopy(textBytes, 0, payload, 11, textBytes.length);
-        writeInt32LE(payload, 11 + textBytes.length, color);
-        
-        byte[] command = buildPacket(Command.COMMAND_ACTION_DRAW_TEXT, Algorithm.ALGORITHM_ANY, payload);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return response != null && response.length >= 2 && response[1] == 0;
+        payload[11 + textBytes.length] = 0;
+        writeInt32LE(payload, 12 + textBytes.length, color);
+        return isSuccessful(sendCommand(Command.COMMAND_ACTION_DRAW_TEXT, Algorithm.ALGORITHM_ANY, payload));
     }
 
     public boolean clearText() {
-        byte[] command = buildPacket(Command.COMMAND_ACTION_CLEAR_TEXT, Algorithm.ALGORITHM_ANY, new byte[0]);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return response != null && response.length >= 2 && response[1] == 0;
+        return isSuccessful(sendCommand(Command.COMMAND_ACTION_CLEAR_TEXT, Algorithm.ALGORITHM_ANY, new byte[0]));
     }
 
     public boolean playMusic(String name, int volume) {
-        byte[] nameBytes = name.getBytes();
+        byte[] nameBytes = name.getBytes(StandardCharsets.UTF_8);
         byte[] payload = new byte[11 + nameBytes.length];
-        writeShortLE(payload, 2, (short)volume);
+        writeShortLE(payload, 2, volume);
         payload[10] = (byte) nameBytes.length;
         System.arraycopy(nameBytes, 0, payload, 11, nameBytes.length);
-        
-        byte[] command = buildPacket(Command.COMMAND_ACTION_PLAY_MUSIC, Algorithm.ALGORITHM_ANY, payload);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return response != null && response.length >= 2 && response[1] == 0;
+        return isSuccessful(sendCommand(Command.COMMAND_ACTION_PLAY_MUSIC, Algorithm.ALGORITHM_ANY, payload));
     }
 
-    public boolean setNameByID(Algorithm algo, int id, String name) {
-        byte[] nameBytes = name.getBytes();
+    public boolean setNameByID(Algorithm algorithm, int id, String name) {
+        byte[] nameBytes = name.getBytes(StandardCharsets.UTF_8);
         byte[] payload = new byte[11 + nameBytes.length];
         payload[0] = (byte) id;
         payload[10] = (byte) nameBytes.length;
         System.arraycopy(nameBytes, 0, payload, 11, nameBytes.length);
-        
-        byte[] command = buildPacket(Command.COMMAND_SET_NAME_BY_ID, algo, payload);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return response != null && response.length >= 2 && response[1] == 0;
+        return isSuccessful(sendCommand(Command.COMMAND_SET_NAME_BY_ID, algorithm, payload));
     }
 
     public boolean startRecording(int mediaType, int duration, String filename, int resolution) {
-        byte[] fileBytes = filename.getBytes();
-        byte[] payload = new byte[11 + fileBytes.length];
+        byte[] filenameBytes = filename.getBytes(StandardCharsets.UTF_8);
+        byte[] payload = new byte[11 + filenameBytes.length];
         payload[0] = (byte) resolution;
         payload[1] = (byte) mediaType;
-        writeShortLE(payload, 2, (short)duration);
-        payload[10] = (byte) fileBytes.length;
-        System.arraycopy(fileBytes, 0, payload, 11, fileBytes.length);
-        
-        byte[] command = buildPacket(Command.COMMAND_ACTION_START_RECORDING, Algorithm.ALGORITHM_ANY, payload);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return response != null && response.length >= 2 && response[1] == 0;
+        writeShortLE(payload, 2, duration);
+        payload[10] = (byte) filenameBytes.length;
+        System.arraycopy(filenameBytes, 0, payload, 11, filenameBytes.length);
+        return isSuccessful(sendCommand(Command.COMMAND_ACTION_START_RECORDING, Algorithm.ALGORITHM_ANY, payload));
     }
 
     public boolean stopRecording(int mediaType) {
-        byte[] payload = new byte[10];
+        byte[] payload = new byte[FIXED_DATA_BYTES];
         payload[1] = (byte) mediaType;
-        byte[] command = buildPacket(Command.COMMAND_ACTION_STOP_RECORDING, Algorithm.ALGORITHM_ANY, payload);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return response != null && response.length >= 2 && response[1] == 0;
+        return isSuccessful(sendCommand(Command.COMMAND_ACTION_STOP_RECORDING, Algorithm.ALGORITHM_ANY, payload));
     }
 
-    public boolean updateAlgorithmParams(Algorithm algo) {
-        byte[] command = buildPacket(Command.COMMAND_UPDATE_ALGORITHM_PARAMS, algo, new byte[0]);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return response != null && response.length >= 2 && response[1] == 0;
+    public boolean updateAlgorithmParams(Algorithm algorithm) {
+        return isSuccessful(sendCommand(Command.COMMAND_UPDATE_ALGORITHM_PARAMS, algorithm, new byte[0]));
     }
 
-    public boolean setMultiAlgorithm(Algorithm... algos) {
-        if (algos.length > 3) return false;
-        byte[] payload = new byte[10];
-        payload[0] = (byte) algos.length;
-        // payload[1] RFU
-        for (int i = 0; i < algos.length; i++) {
-            writeShortLE(payload, 2 + i * 2, (short) algos[i].id);
-        }
-        byte[] command = buildPacket(Command.COMMAND_SET_MULTI_ALGORITHM, Algorithm.ALGORITHM_ANY, payload);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return response != null && response.length >= 2 && response[1] == 0;
-    }
-
-    public boolean setMultiAlgorithmRatio(int... ratios) {
-        if (ratios.length > 3) return false;
-        byte[] payload = new byte[10];
-        payload[0] = (byte) ratios.length;
-        for (int i = 0; i < ratios.length; i++) {
-            writeShortLE(payload, 2 + i * 2, (short) ratios[i]);
-        }
-        byte[] command = buildPacket(Command.COMMAND_SET_MULTI_ALGORITHM_RATIO, Algorithm.ALGORITHM_ANY, payload);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return response != null && response.length >= 2 && response[1] == 0;
-    }
-
-    public Object getAlgorithmParam(Algorithm algo, String key) {
-        byte[] keyBytes = key.getBytes();
-        byte[] payload = new byte[11 + keyBytes.length];
-        payload[10] = (byte) keyBytes.length;
-        System.arraycopy(keyBytes, 0, payload, 11, keyBytes.length);
-        
-        byte[] command = buildPacket(Command.COMMAND_GET_ALGO_PARAM, algo, payload);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return parseGetParamResponse(response);
-    }
-
-    private Object parseGetParamResponse(byte[] response) {
-        if (response == null || response.length < 2 || response[1] != 0) return null;
-        int totalIntArgs = TypeConversion.unsignedByteToInt(response[0]);
-        if (totalIntArgs == 1) {
-            return readShortLE(response, 2) != 0;
-        } else if (totalIntArgs == 2) {
-            int v0 = readShortLE(response, 2);
-            int v1 = readShortLE(response, 4);
-            int bits = ((v1 & 0xFFFF) << 16) | (v0 & 0xFFFF);
-            return Float.intBitsToFloat(bits);
-        } else if (response.length > 10) {
-            return parseStringResponse(response);
-        }
-        return null;
-    }
-
-    public boolean setAlgorithmParam(Algorithm algo, String key, Object value) {
-        byte[] keyBytes = key.getBytes();
-        byte[] payload;
-        
-        if (value instanceof Boolean) {
-            payload = new byte[11 + keyBytes.length + 1];
-            payload[0] = 1; // totalIntArgs
-            writeShortLE(payload, 2, (short)((Boolean)value ? 1 : 0));
-            payload[10] = (byte) keyBytes.length;
-            System.arraycopy(keyBytes, 0, payload, 11, keyBytes.length);
-            payload[11 + keyBytes.length] = 0; // arg0_str len
-        } else if (value instanceof Float) {
-            payload = new byte[11 + keyBytes.length + 1];
-            payload[0] = 2; // totalIntArgs
-            float f = (Float)value;
-            int bits = Float.floatToIntBits(f);
-            writeShortLE(payload, 2, (short)(bits & 0xFFFF));
-            writeShortLE(payload, 4, (short)((bits >> 16) & 0xFFFF));
-            payload[10] = (byte) keyBytes.length;
-            System.arraycopy(keyBytes, 0, payload, 11, keyBytes.length);
-            payload[11 + keyBytes.length] = 0; // arg0_str len
-        } else if (value instanceof String) {
-            byte[] valBytes = ((String)value).getBytes();
-            payload = new byte[11 + keyBytes.length + 1 + valBytes.length];
-            payload[10] = (byte) keyBytes.length;
-            System.arraycopy(keyBytes, 0, payload, 11, keyBytes.length);
-            payload[11 + keyBytes.length] = (byte) valBytes.length;
-            System.arraycopy(valBytes, 0, payload, 12 + keyBytes.length, valBytes.length);
-        } else {
+    public boolean setMultiAlgorithm(Algorithm... algorithms) {
+        if (algorithms == null || algorithms.length == 0 || algorithms.length > MAX_MULTI_ALGORITHMS) {
             return false;
         }
 
-        byte[] command = buildPacket(Command.COMMAND_SET_ALGO_PARAMS, algo, payload);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return response != null && response.length >= 2 && response[1] == 0;
+        byte[] payload = new byte[FIXED_DATA_BYTES];
+        payload[0] = (byte) algorithms.length;
+        for (int i = 0; i < algorithms.length; i++) {
+            writeShortLE(payload, 2 + (i * 2), algorithms[i].id);
+        }
+        return isSuccessful(sendCommand(Command.COMMAND_SET_MULTI_ALGORITHM, Algorithm.ALGORITHM_ANY, payload));
+    }
+
+    public boolean setMultiAlgorithmRatio(int... ratios) {
+        if (ratios == null || ratios.length == 0 || ratios.length > MAX_MULTI_ALGORITHMS) {
+            return false;
+        }
+
+        byte[] payload = new byte[FIXED_DATA_BYTES];
+        payload[0] = (byte) ratios.length;
+        for (int i = 0; i < ratios.length; i++) {
+            writeShortLE(payload, 2 + (i * 2), ratios[i]);
+        }
+        return isSuccessful(sendCommand(Command.COMMAND_SET_MULTI_ALGORITHM_RATIO, Algorithm.ALGORITHM_ANY, payload));
+    }
+
+    public Boolean getAlgorithmParamBoolean(Algorithm algorithm, String key) {
+        ArgsResponse response = sendGetAlgorithmParam(algorithm, key);
+        if (!isSuccessful(response) || response.totalIntArgs < 1) {
+            return null;
+        }
+        return response.intArgs[0] != 0;
+    }
+
+    public Float getAlgorithmParamFloat(Algorithm algorithm, String key) {
+        ArgsResponse response = sendGetAlgorithmParam(algorithm, key);
+        if (!isSuccessful(response) || response.totalIntArgs < 2) {
+            return null;
+        }
+        int low = response.intArgs[0] & 0xFFFF;
+        int high = response.intArgs[1] & 0xFFFF;
+        return Float.intBitsToFloat((high << 16) | low);
+    }
+
+    public String getAlgorithmParamString(Algorithm algorithm, String key) {
+        return firstStringArg(sendGetAlgorithmParam(algorithm, key));
+    }
+
+    public Object getAlgorithmParam(Algorithm algorithm, String key) {
+        ArgsResponse response = sendGetAlgorithmParam(algorithm, key);
+        if (!isSuccessful(response)) {
+            return null;
+        }
+        if (!response.stringArgs.isEmpty()) {
+            return response.stringArgs.get(0);
+        }
+        if (response.totalIntArgs >= 2) {
+            int low = response.intArgs[0] & 0xFFFF;
+            int high = response.intArgs[1] & 0xFFFF;
+            return Float.intBitsToFloat((high << 16) | low);
+        }
+        if (response.totalIntArgs >= 1) {
+            return response.intArgs[0] != 0;
+        }
+        return null;
+    }
+
+    public boolean setAlgorithmParam(Algorithm algorithm, String key, boolean value) {
+        byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
+        byte[] payload = new byte[12 + keyBytes.length];
+        payload[0] = 1;
+        writeShortLE(payload, 2, value ? 1 : 0);
+        payload[10] = (byte) keyBytes.length;
+        System.arraycopy(keyBytes, 0, payload, 11, keyBytes.length);
+        payload[11 + keyBytes.length] = 0;
+        return isSuccessful(sendCommand(Command.COMMAND_SET_ALGO_PARAMS, algorithm, payload));
+    }
+
+    public boolean setAlgorithmParam(Algorithm algorithm, String key, float value) {
+        byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
+        byte[] payload = new byte[12 + keyBytes.length];
+        int bits = Float.floatToIntBits(value);
+        payload[0] = 2;
+        writeShortLE(payload, 2, bits & 0xFFFF);
+        writeShortLE(payload, 4, (bits >>> 16) & 0xFFFF);
+        payload[10] = (byte) keyBytes.length;
+        System.arraycopy(keyBytes, 0, payload, 11, keyBytes.length);
+        payload[11 + keyBytes.length] = 0;
+        return isSuccessful(sendCommand(Command.COMMAND_SET_ALGO_PARAMS, algorithm, payload));
+    }
+
+    public boolean setAlgorithmParam(Algorithm algorithm, String key, String value) {
+        byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
+        byte[] valueBytes = value.getBytes(StandardCharsets.UTF_8);
+        byte[] payload = new byte[12 + keyBytes.length + valueBytes.length];
+        payload[10] = (byte) keyBytes.length;
+        System.arraycopy(keyBytes, 0, payload, 11, keyBytes.length);
+        payload[11 + keyBytes.length] = (byte) valueBytes.length;
+        System.arraycopy(valueBytes, 0, payload, 12 + keyBytes.length, valueBytes.length);
+        return isSuccessful(sendCommand(Command.COMMAND_SET_ALGO_PARAMS, algorithm, payload));
+    }
+
+    public boolean setAlgorithmParam(Algorithm algorithm, String key, Object value) {
+        if (value instanceof Boolean) {
+            return setAlgorithmParam(algorithm, key, ((Boolean) value).booleanValue());
+        }
+        if (value instanceof Float) {
+            return setAlgorithmParam(algorithm, key, ((Float) value).floatValue());
+        }
+        if (value instanceof String) {
+            return setAlgorithmParam(algorithm, key, (String) value);
+        }
+        return false;
     }
 
     public boolean exit() {
-        byte[] command = buildPacket(Command.COMMAND_EXIT, Algorithm.ALGORITHM_ANY, new byte[0]);
-        deviceClient.write(command);
-        byte[] response = receivePacket(Command.COMMAND_RETURN_ARGS);
-        return response != null && response.length >= 2 && response[1] == 0;
+        return isSuccessful(sendCommand(Command.COMMAND_EXIT, Algorithm.ALGORITHM_ANY, new byte[0]));
     }
 
-    private String parseStringResponse(byte[] response) {
-        if (response != null && response.length > 10) {
-            int nameLen = TypeConversion.unsignedByteToInt(response[10]);
-            if (response.length >= 11 + nameLen) {
-                return new String(response, 11, nameLen);
+    private boolean drawRectBase(Command command, int color, int lineWidth, int x, int y, int width, int height) {
+        byte[] payload = new byte[16];
+        payload[0] = 0;
+        payload[1] = (byte) lineWidth;
+        writeShortLE(payload, 2, x);
+        writeShortLE(payload, 4, y);
+        writeShortLE(payload, 6, width);
+        writeShortLE(payload, 8, height);
+        writeShortLE(payload, 10, 0);
+        writeInt32LE(payload, 12, color);
+        return isSuccessful(sendCommand(command, Algorithm.ALGORITHM_ANY, payload));
+    }
+
+    private ArgsResponse sendGetAlgorithmParam(Algorithm algorithm, String key) {
+        byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
+        byte[] payload = new byte[11 + keyBytes.length];
+        payload[10] = (byte) keyBytes.length;
+        System.arraycopy(keyBytes, 0, payload, 11, keyBytes.length);
+        return sendCommand(Command.COMMAND_GET_ALGO_PARAM, algorithm, payload);
+    }
+
+    private Info getInfo(Algorithm algorithm) {
+        byte[] response = transact(Command.COMMAND_GET_RESULT, algorithm, new byte[0], Command.COMMAND_RETURN_INFO);
+        if (response == null || response.length < FIXED_DATA_BYTES) {
+            return null;
+        }
+
+        Info info = new Info();
+        info.maxID = unsignedByte(response[0]);
+        info.totalResults = readShortLE(response, 2);
+        info.totalResultsLearned = readShortLE(response, 4);
+        info.totalBlocks = readShortLE(response, 6);
+        info.totalBlocksLearned = readShortLE(response, 8);
+        return info;
+    }
+
+    private Block parseBlock(byte[] data) {
+        Block block = new Block();
+        block.id = unsignedByte(data[0]);
+        block.algorithmId = data.length > 1 ? unsignedByte(data[1]) : 0;
+        block.algorithm = Algorithm.fromId(block.algorithmId);
+        block.xCenter = readShortLE(data, 2);
+        block.yCenter = readShortLE(data, 4);
+        block.width = readShortLE(data, 6);
+        block.height = readShortLE(data, 8);
+
+        int offset = 10;
+        StringResult name = readLengthPrefixedString(data, offset);
+        block.name = name.value;
+        offset = name.nextOffset;
+
+        StringResult content = readLengthPrefixedString(data, offset);
+        block.content = content.value;
+        offset = content.nextOffset;
+
+        if (offset < data.length) {
+            block.privateData = new byte[data.length - offset];
+            System.arraycopy(data, offset, block.privateData, 0, block.privateData.length);
+        }
+        return block;
+    }
+
+    private Arrow parseArrow(byte[] data) {
+        Arrow arrow = new Arrow();
+        arrow.id = unsignedByte(data[0]);
+        arrow.level = data.length > 1 ? unsignedByte(data[1]) : 0;
+        arrow.xTarget = readShortLE(data, 2);
+        arrow.yTarget = readShortLE(data, 4);
+        arrow.angle = readShortLE(data, 6);
+        arrow.length = readShortLE(data, 8);
+        return arrow;
+    }
+
+    private ArgsResponse sendCommand(Command command, Algorithm algorithm, byte[] payload) {
+        byte[] response = transact(command, algorithm, payload, Command.COMMAND_RETURN_ARGS);
+        return parseArgsResponse(response);
+    }
+
+    private byte[] transact(Command command, Algorithm algorithm, byte[] payload, Command expectedResponse) {
+        byte[] packet = buildPacket(command, algorithm, payload);
+        for (int attempt = 0; attempt < RETRY_COUNT; attempt++) {
+            deviceClient.write(packet);
+            byte[] response = waitForPacket(expectedResponse);
+            if (response != null) {
+                return response;
             }
         }
         return null;
+    }
+
+    private byte[] waitForPacket(Command expectedCommand) {
+        long deadlineMs = System.currentTimeMillis() + RESPONSE_TIMEOUT_MS;
+        while (System.currentTimeMillis() <= deadlineMs) {
+            safeSleep(RESPONSE_POLL_INTERVAL_MS);
+            byte[] response = receivePacket(expectedCommand);
+            if (response != null) {
+                return response;
+            }
+        }
+        return null;
+    }
+
+    private ArgsResponse parseArgsResponse(byte[] response) {
+        if (response == null || response.length < FIXED_DATA_BYTES) {
+            return new ArgsResponse(0, false, new int[0], Collections.<String>emptyList());
+        }
+
+        int totalIntArgs = unsignedByte(response[0]);
+        boolean success = response[1] == 0;
+
+        int argCount = Math.min(totalIntArgs, 4);
+        int[] intArgs = new int[argCount];
+        for (int i = 0; i < argCount; i++) {
+            intArgs[i] = readShortLE(response, 2 + (i * 2));
+        }
+
+        List<String> stringArgs = new ArrayList<>();
+        int offset = 10;
+        while (offset < response.length) {
+            int length = unsignedByte(response[offset]);
+            offset++;
+            if (length == 0 || offset + length > response.length) {
+                break;
+            }
+            stringArgs.add(new String(response, offset, length, StandardCharsets.UTF_8));
+            offset += length;
+        }
+
+        return new ArgsResponse(totalIntArgs, success, intArgs, stringArgs);
+    }
+
+    private boolean isSuccessful(ArgsResponse response) {
+        return response != null && response.success;
+    }
+
+    private int firstIntArg(ArgsResponse response) {
+        if (!isSuccessful(response) || response.intArgs.length == 0) {
+            return 0;
+        }
+        return response.intArgs[0];
+    }
+
+    private String firstStringArg(ArgsResponse response) {
+        if (!isSuccessful(response) || response.stringArgs.isEmpty()) {
+            return "";
+        }
+        return response.stringArgs.get(0);
+    }
+
+    private byte[] buildPacket(Command command, Algorithm algorithm, byte[] data) {
+        byte[] packet = new byte[5 + data.length + 1];
+        packet[0] = (byte) HEADER_0;
+        packet[1] = (byte) HEADER_1;
+        packet[2] = (byte) command.id;
+        packet[3] = (byte) algorithm.id;
+        packet[4] = (byte) data.length;
+        System.arraycopy(data, 0, packet, 5, data.length);
+
+        int checksum = 0;
+        for (int i = 0; i < packet.length - 1; i++) {
+            checksum += unsignedByte(packet[i]);
+        }
+        packet[packet.length - 1] = (byte) (checksum & 0xFF);
+        return packet;
+    }
+
+    private byte[] receivePacket(Command expectedCommand) {
+        byte[] header = deviceClient.read(5);
+        if (header.length < 5) {
+            return null;
+        }
+        if (unsignedByte(header[0]) != HEADER_0 || unsignedByte(header[1]) != HEADER_1) {
+            return null;
+        }
+        if (unsignedByte(header[2]) != expectedCommand.id) {
+            return null;
+        }
+
+        int dataLength = unsignedByte(header[4]);
+        byte[] payloadAndChecksum = deviceClient.read(dataLength + 1);
+        if (payloadAndChecksum.length < dataLength + 1) {
+            return null;
+        }
+
+        int checksum = 0;
+        for (byte value : header) {
+            checksum += unsignedByte(value);
+        }
+        for (int i = 0; i < dataLength; i++) {
+            checksum += unsignedByte(payloadAndChecksum[i]);
+        }
+        if ((checksum & 0xFF) != unsignedByte(payloadAndChecksum[dataLength])) {
+            return null;
+        }
+
+        byte[] payload = new byte[dataLength];
+        System.arraycopy(payloadAndChecksum, 0, payload, 0, dataLength);
+        return payload;
+    }
+
+    private int unsignedByte(byte value) {
+        return TypeConversion.unsignedByteToInt(value);
+    }
+
+    private int readShortLE(byte[] data, int offset) {
+        return (short) ((data[offset] & 0xFF) | ((data[offset + 1] & 0xFF) << 8));
+    }
+
+    private void writeShortLE(byte[] data, int offset, int value) {
+        data[offset] = (byte) (value & 0xFF);
+        data[offset + 1] = (byte) ((value >> 8) & 0xFF);
     }
 
     private void writeInt32LE(byte[] data, int offset, int value) {
@@ -543,116 +745,34 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         data[offset + 3] = (byte) ((value >> 24) & 0xFF);
     }
 
-    private void writeShortLE(byte[] data, int offset, short value) {
-        data[offset] = (byte) (value & 0xFF);
-        data[offset + 1] = (byte) ((value >> 8) & 0xFF);
-    }
-
-    private Info getInfo(Algorithm algo) {
-        byte[] command = buildPacket(Command.COMMAND_GET_RESULT, algo, new byte[0]);
-        deviceClient.write(command);
-
-        byte[] infoData = receivePacket(Command.COMMAND_RETURN_INFO);
-        if (infoData != null) {
-            Info info = new Info();
-            info.maxID = TypeConversion.unsignedByteToInt(infoData[0]);
-            info.totalResults = readShortLE(infoData, 2);
-            info.totalResultsLearned = readShortLE(infoData, 4);
-            info.totalBlocks = readShortLE(infoData, 6);
-            info.totalBlocksLearned = readShortLE(infoData, 8);
-            return info;
+    private void safeSleep(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException interruptedException) {
+            Thread.currentThread().interrupt();
         }
-        return null;
     }
 
-    private Block parseBlock(byte[] data) {
-        Block block = new Block();
-        block.id = TypeConversion.unsignedByteToInt(data[0]);
-        block.xCenter = readShortLE(data, 2);
-        block.yCenter = readShortLE(data, 4);
-        block.width = readShortLE(data, 6);
-        block.height = readShortLE(data, 8);
-        
-        int offset = 10;
-        if (data.length > offset) {
-            int nameLen = TypeConversion.unsignedByteToInt(data[offset]);
-            offset++;
-            if (nameLen > 0 && data.length >= offset + nameLen) {
-                block.name = new String(data, offset, nameLen);
-                offset += nameLen;
-            }
-            if (data.length > offset) {
-                int contentLen = TypeConversion.unsignedByteToInt(data[offset]);
-                offset++;
-                if (contentLen > 0 && data.length >= offset + contentLen) {
-                    block.content = new String(data, offset, contentLen);
-                    offset += contentLen;
-                }
-            }
-            if (data.length > offset) {
-                block.privateData = new byte[data.length - offset];
-                System.arraycopy(data, offset, block.privateData, 0, block.privateData.length);
-            }
+    private StringResult readLengthPrefixedString(byte[] data, int offset) {
+        if (offset >= data.length) {
+            return new StringResult("", offset);
         }
-        return block;
-    }
-
-    private Arrow parseArrow(byte[] data) {
-        Arrow arrow = new Arrow();
-        arrow.id = TypeConversion.unsignedByteToInt(data[0]);
-        arrow.xTarget = readShortLE(data, 2);
-        arrow.yTarget = readShortLE(data, 4);
-        arrow.angle = readShortLE(data, 6);
-        arrow.length = readShortLE(data, 8);
-        return arrow;
-    }
-
-    private short readShortLE(byte[] data, int offset) {
-        return (short) ((data[offset] & 0xFF) | ((data[offset + 1] & 0xFF) << 8));
-    }
-
-    private byte[] buildPacket(Command cmd, Algorithm algo, byte[] data) {
-        byte[] packet = new byte[5 + data.length + 1];
-        packet[0] = (byte) HEADER_0;
-        packet[1] = (byte) HEADER_1;
-        packet[2] = (byte) cmd.id;
-        packet[3] = (byte) algo.id;
-        packet[4] = (byte) data.length;
-        System.arraycopy(data, 0, packet, 5, data.length);
-        
-        int checksum = 0;
-        for (int i = 0; i < packet.length - 1; i++) {
-            checksum += TypeConversion.unsignedByteToInt(packet[i]);
+        int length = unsignedByte(data[offset]);
+        offset++;
+        if (length <= 0 || offset + length > data.length) {
+            return new StringResult("", Math.min(offset, data.length));
         }
-        packet[packet.length - 1] = (byte) (checksum & 0xFF);
-        return packet;
+        String value = new String(data, offset, length, StandardCharsets.UTF_8);
+        return new StringResult(value, offset + length);
     }
 
-    private byte[] receivePacket(Command expectedCmd) {
-        byte[] header = deviceClient.read(5);
-        if (header.length < 5) return null;
-        if (TypeConversion.unsignedByteToInt(header[0]) != HEADER_0 || 
-            TypeConversion.unsignedByteToInt(header[1]) != HEADER_1) {
-            return null;
+    private static final class StringResult {
+        final String value;
+        final int nextOffset;
+
+        StringResult(String value, int nextOffset) {
+            this.value = value;
+            this.nextOffset = nextOffset;
         }
-
-        int cmdId = TypeConversion.unsignedByteToInt(header[2]);
-        if (cmdId != expectedCmd.id) return null;
-
-        int dataLen = TypeConversion.unsignedByteToInt(header[4]);
-        byte[] data = deviceClient.read(dataLen + 1); // data + checksum
-        if (data.length < dataLen + 1) return null;
-
-        int checksum = 0;
-        for (byte b : header) checksum += TypeConversion.unsignedByteToInt(b);
-        for (int i = 0; i < dataLen; i++) checksum += TypeConversion.unsignedByteToInt(data[i]);
-        
-        if ((checksum & 0xFF) != TypeConversion.unsignedByteToInt(data[dataLen])) {
-            return null;
-        }
-
-        byte[] result = new byte[dataLen];
-        System.arraycopy(data, 0, result, 0, dataLen);
-        return result;
     }
 }
