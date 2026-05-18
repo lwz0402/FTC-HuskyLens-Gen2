@@ -1,166 +1,196 @@
 # FTC HuskyLens Gen2
 
-This repository is an FTC Android Studio project based on the official FTC SDK, extended with a Java driver and sample OpModes for **DFRobot HuskyLens Gen2**.
+FTC Java driver and sample OpModes for the DFRobot HUSKYLENS 2 / SEN0638 camera on a REV Control Hub.
 
-It now uses a single consolidated README as the primary project document. Content that previously lived in the project-level `TeamCode` and `huskylens` README files has been merged here.
+This repository keeps the HuskyLens Gen2 work intentionally small and FTC-friendly:
 
-## Development Information
-- **Developer**: Arthur LIU from First Tech Challenge Team #25787 & #27570
-- **Official Sponsor**: Proudly sponsored by **DFRobot**, the creators of HuskyLens.
+- One driver file: `TeamCode/src/main/java/org/firstinspires/ftc/teamcode/huskylens/HuskyLens2.java`
+- One full API teaching sample: `TeamCode/src/main/java/org/firstinspires/ftc/teamcode/huskylens/HuskyLens2MasterSample.java`
+- One practical tag tracker sample: `TeamCode/src/main/java/org/firstinspires/ftc/teamcode/HuskyLens2TagTracker.java`
 
-## Project Summary
+## Hardware Setup
 
-This project combines:
+1. Connect HUSKYLENS 2 to a REV Control Hub I2C port.
+2. In Driver Station, open `Configure Robot`.
+3. Add an I2C device using type `HuskyLens Gen2` / `HuskyLens2`.
+4. Name the device `huskylens` for the included samples.
+5. Save and restart the Robot Controller if prompted.
 
-- The official FTC SDK project structure
-- A custom FTC Java I2C driver for HuskyLens Gen2
-- A practical AprilTag tracking sample
-- A broader master sample for testing the public HuskyLens API
-- Bundled official HuskyLens Gen2 protocol and reference materials
+The default Gen2 I2C address is `0x50` 7-bit.
 
-The HuskyLens Java driver in this repository is aligned with:
+For multiple HUSKYLENS 2 cameras, use separate REV I2C ports unless every camera has a unique I2C address. Do not put multiple default-address `0x50` cameras on the same bus.
 
-- `TeamCode/src/main/java/org/firstinspires/ftc/teamcode/HuskyLens2_Documents/HuskyLens2_Protocol.md`
-- `TeamCode/src/main/java/org/firstinspires/ftc/teamcode/HuskyLens2_Documents/HuskyLens2_Wiki_compressed.pdf`
-- `TeamCode/src/main/java/org/firstinspires/ftc/teamcode/HuskyLens2_Documents/DFRobot_HuskylensV2-master/`
+## Files
 
-## Requirements
+### `HuskyLens2.java`
 
-- Android Studio Ladybug (2024.2) or later
-- FTC Robot Controller / Driver Station environment compatible with this SDK branch
-- A REV Control Hub or Expansion Hub
-- HuskyLens Gen2 connected over I2C
+Production driver for FTC SDK:
 
-## Repository Structure
-
-- `FtcRobotController/`
-  Official FTC SDK Robot Controller module and sample OpModes.
-- `TeamCode/`
-  Team module containing the HuskyLens driver, sample OpModes, and bundled reference docs.
-- `TeamCode/src/main/java/org/firstinspires/ftc/teamcode/huskylens/HuskyLens2.java`
-  Main FTC HuskyLens Gen2 Java driver.
-- `TeamCode/src/main/java/org/firstinspires/ftc/teamcode/huskylens/HuskyLens2MasterSample.java`
-  Interactive sample for switching algorithms and testing driver features.
-- `TeamCode/src/main/java/org/firstinspires/ftc/teamcode/HuskyLens2TagTracker.java`
-  Practical AprilTag tracker example using a servo and shooter motor.
-- `TeamCode/src/main/java/org/firstinspires/ftc/teamcode/HuskyLens2_Documents/`
-  Official protocol, wiki export, and DFRobot reference implementations kept as source material.
-
-## FTC TeamCode Notes
-
-`TeamCode` is the module where your team-specific OpModes live. In a normal FTC workflow:
-
-1. Start from the `FtcRobotController` sample OpModes if you need a baseline.
-2. Put your custom robot code in `TeamCode`.
-3. Register OpModes with `@TeleOp` or `@Autonomous`.
-4. Configure hardware names in the Robot Controller configuration to match your code.
-
-## HuskyLens Gen2 FTC Support
-
-The driver currently covers:
-
-- I2C communication at address `0x50`
+- FTC `I2cDeviceSynchDevice<I2cDeviceSynch>` hardware device
+- `@I2cDeviceType` / `@DeviceProperties` registration
+- Gen2 packet format: `55 AA command algorithm length payload checksum`
+- I2C default address `0x50`
 - Algorithm switching
-- Result parsing for `Block` and `Arrow`
-- AprilTag / Tag Recognition
-- Learning, forgetting, and knowledge slot save / load
-- Text and rectangle drawing on the HuskyLens display
-- Photo / screenshot capture
-- Music playback
-- Audio / video recording
-- Algorithm parameter read / write helpers for `boolean`, `float`, and `String`
+- Block and arrow result parsing
+- Non-blocking result request / poll API
+- Bounded compatibility read helpers
+- Learning, forgetting, knowledge save/load
+- Display overlays, text drawing, screenshots/photos
+- Music and recording commands
+- Algorithm parameter helpers
 
-## Hardware Configuration
+### `HuskyLens2MasterSample.java`
 
-### Minimum HuskyLens setup
+Interactive TeleOp that demonstrates all public driver calls and shows returned data through telemetry.
 
-1. Connect HuskyLens Gen2 to an I2C port.
-2. Open the FTC Robot Controller configuration.
-3. Add an I2C device with:
-   - **Type**: `HuskyLens2`
-   - **Name**: `huskylens`
+Controls:
 
-### Additional hardware for the AprilTag tracker sample
+- D-pad left/right: cycle algorithms
+- `A`: `knock()`
+- `X`: learn and save knowledge
+- `B`: load knowledge
+- `Y`: forget
+- Left bumper: draw overlays
+- Right bumper: photo/screenshot demo
+- Left trigger: start recording
+- Right trigger: stop recording
+- Start: algorithm parameter demo
+- Back: multi-algorithm demo
+- Left stick button: play music
+- Right stick button: set name by ID
 
-If you want to run `HuskyLens2TagTracker`, also configure:
+### `HuskyLens2TagTracker.java`
 
+Practical tag tracking example:
+
+- Selects Tag Recognition
+- Reads tag blocks using non-blocking polling
+- Picks the tag closest to optical center
+- Pans `turretServo`
+- Runs `shooterMotor` only after the tag is centered for several frames
+
+Configure these hardware names if you run it:
+
+- `huskylens`
 - `turretServo`
 - `shooterMotor`
 
-## Coordinate System
+## Recommended Non-Blocking Read Pattern
 
-Following the official HuskyLens Gen2 V2 reference implementation, this project treats the HuskyLens image space as:
-
-- Width: `640`
-- Height: `480`
-- Optical center: `320, 240`
-
-Use:
-
-```java
-int centerX = HuskyLens2.FRAME_WIDTH / 2;
-int centerY = HuskyLens2.FRAME_HEIGHT / 2;
-```
-
-## Included OpModes
-
-### `HuskyLens2MasterSample`
-
-Purpose:
-
-- Test connectivity
-- Switch between algorithms
-- Inspect returned blocks and arrows
-- Trigger photo, screenshot, learning, music, and recording features
-
-### `HuskyLens2TagTracker`
-
-Purpose:
-
-- Switch HuskyLens to Tag Recognition
-- Select the detected tag closest to the optical center
-- Pan a servo until the tag is centered
-- Only activate the shooter after lock is stable across multiple frames
-
-## Quick Start
+Use this pattern in TeleOp and Autonomous loops:
 
 ```java
 HuskyLens2 huskyLens = hardwareMap.get(HuskyLens2.class, "huskylens");
 
-if (huskyLens.knock()) {
-    huskyLens.selectAlgorithm(HuskyLens2.Algorithm.ALGORITHM_TAG_RECOGNITION);
+huskyLens.knock();
+huskyLens.selectAlgorithm(HuskyLens2.Algorithm.ALGORITHM_TAG_RECOGNITION);
+huskyLens.beginResultRequest(HuskyLens2.Algorithm.ALGORITHM_TAG_RECOGNITION);
+
+while (opModeIsActive()) {
+    boolean complete = huskyLens.pollResultRequest(2, 4);
+    HuskyLens2.ReadStatus status = huskyLens.getLastReadStatus();
+
+    for (HuskyLens2.Block tag : huskyLens.getCachedBlocks()) {
+        telemetry.addData("Tag ID", tag.id);
+        telemetry.addData("Center", "%d, %d", tag.xCenter, tag.yCenter);
+        telemetry.addData("Size", "%d x %d", tag.width, tag.height);
+        telemetry.addData("Name", tag.name);
+        telemetry.addData("Content", tag.content);
+    }
+
+    if (complete || isFinishedStatus(status)) {
+        huskyLens.beginResultRequest(HuskyLens2.Algorithm.ALGORITHM_TAG_RECOGNITION);
+    }
+
+    telemetry.addData("Husky Status", status);
+    telemetry.update();
+    idle();
 }
 ```
 
-## AprilTag Example
+Terminal read states:
 
-```java
-List<HuskyLens2.Block> tags =
-        huskyLens.requestBlocks(HuskyLens2.Algorithm.ALGORITHM_TAG_RECOGNITION);
+- `TIMEOUT`
+- `TRUNCATED`
+- `CHECKSUM_ERROR`
+- `MALFORMED_PACKET`
+- `PACKET_TOO_LARGE`
+- `I2C_ERROR`
 
-for (HuskyLens2.Block tag : tags) {
-    telemetry.addData("Tag ID", tag.id);
-    telemetry.addData("Center", "%d, %d", tag.xCenter, tag.yCenter);
-    telemetry.addData("Size", "%d x %d", tag.width, tag.height);
-    telemetry.addData("Name", tag.name);
-    telemetry.addData("Content", tag.content);
-}
-```
+## API Summary
 
-## HuskyLens Java API Summary
+Connection and configuration:
 
-### Connection and algorithm control
-
+- `initialize(HuskyLens2.Parameters parameters)`
+- `getParameters()`
+- `setI2cAddress(I2cAddr address)`
+- `getI2cAddress()`
 - `knock()`
-- `switchAlgorithm(Algorithm algorithm)`
-- `selectAlgorithm(Algorithm algorithm)`
-- `requestInfo(Algorithm algorithm)`
 - `exit()`
 
-### Result retrieval
+Algorithms:
 
+- `selectAlgorithm(Algorithm algorithm)`
+- `selectAlgorithm(int algorithmId)`
+- `switchAlgorithm(Algorithm algorithm)`
+- `setMultiAlgorithm(Algorithm... algorithms)`
+- `setMultiAlgorithmRatio(int... ratios)`
+
+Results:
+
+- `beginResultRequest(Algorithm algorithm)`
+- `pollResultRequest(int maxPackets, long maxMillis)`
+- `getCachedInfo()`
+- `getCachedBlocks()`
+- `getCachedArrows()`
+- `getLastReadStatus()`
+
+Compatibility helpers with bounded waits:
+
+- `requestInfo(Algorithm algorithm)`
 - `requestBlocks(Algorithm algorithm)`
 - `requestArrows(Algorithm algorithm)`
+
+Learning and knowledge:
+
+- `learn(Algorithm algorithm)`
+- `learnBlock(Algorithm algorithm, int x, int y, int width, int height)`
+- `forget()`
+- `forget(Algorithm algorithm)`
+- `saveKnowledge(Algorithm algorithm, int knowledgeId)`
+- `loadKnowledge(Algorithm algorithm, int knowledgeId)`
+
+Display and media:
+
+- `drawRect(int color, int lineWidth, int x, int y, int width, int height)`
+- `drawUniqueRect(int color, int lineWidth, int x, int y, int width, int height)`
+- `clearRect()`
+- `drawText(int color, int fontSize, int x, int y, String text)`
+- `clearText()`
+- `takePhoto()`
+- `takePhoto(int resolution)`
+- `takeScreenshot()`
+- `playMusic(String name, int volume)`
+- `startRecording(int mediaType, int duration, String filename, int resolution)`
+- `stopRecording(int mediaType)`
+
+Algorithm parameters:
+
+- `getAlgorithmParamBoolean(Algorithm algorithm, String key)`
+- `getAlgorithmParamFloat(Algorithm algorithm, String key)`
+- `getAlgorithmParamString(Algorithm algorithm, String key)`
+- `getAlgorithmParam(Algorithm algorithm, String key)`
+- `setAlgorithmParam(Algorithm algorithm, String key, boolean value)`
+- `setAlgorithmParam(Algorithm algorithm, String key, float value)`
+- `setAlgorithmParam(Algorithm algorithm, String key, String value)`
+- `setAlgorithmParam(Algorithm algorithm, String key, Object value)`
+- `updateAlgorithmParams(Algorithm algorithm)`
+
+Miscellaneous:
+
+- `setNameByID(Algorithm algorithm, int id, String name)`
+
+## Result Data
 
 `Block` fields:
 
@@ -184,84 +214,44 @@ for (HuskyLens2.Block tag : tags) {
 - `angle`
 - `length`
 
-### Learning and knowledge management
+`Info` fields:
 
-- `learn(Algorithm algorithm)`
-- `learnBlock(Algorithm algorithm, int x, int y, int width, int height)`
-- `forget()`
-- `forget(Algorithm algorithm)`
-- `saveKnowledge(Algorithm algorithm, int knowledgeId)`
-- `loadKnowledge(Algorithm algorithm, int knowledgeId)`
+- `maxID`
+- `totalResults`
+- `totalResultsLearned`
+- `totalBlocks`
+- `totalBlocksLearned`
 
-### Drawing and UI overlay
+## FTC / REV Notes
 
-- `drawRect(int color, int lineWidth, int x, int y, int width, int height)`
-- `drawUniqueRect(int color, int lineWidth, int x, int y, int width, int height)`
-- `clearRect()`
-- `drawText(int color, int fontSize, int x, int y, String text)`
-- `clearText()`
+- The driver uses raw command/response I2C reads and writes, not FTC read windows.
+- REV I2C calls still take finite time, so use the split `beginResultRequest()` / `pollResultRequest()` API in robot control loops.
+- `pollResultRequest(maxPackets, maxMillis)` limits work per loop.
+- Multiple cameras are supported as separate configured FTC hardware devices.
+- Prefer one HUSKYLENS 2 per physical REV I2C port.
+- Bus 0 may share traffic with internal hub devices; external cameras are usually happier on other I2C buses.
 
-### Capture and media
+## Coordinates
 
-- `takePhoto()`
-- `takePhoto(int resolution)`
-- `takeScreenshot()`
-- `playMusic(String name, int volume)`
-- `startRecording(int mediaType, int duration, String filename, int resolution)`
-- `stopRecording(int mediaType)`
+The driver follows the DFRobot Gen2 reference coordinate system:
 
-### Algorithm parameters
+- Width: `640`
+- Height: `480`
+- Center: `320, 240`
 
-- `getAlgorithmParamBoolean(Algorithm algorithm, String key)`
-- `getAlgorithmParamFloat(Algorithm algorithm, String key)`
-- `getAlgorithmParamString(Algorithm algorithm, String key)`
-- `getAlgorithmParam(Algorithm algorithm, String key)`
-- `setAlgorithmParam(Algorithm algorithm, String key, boolean value)`
-- `setAlgorithmParam(Algorithm algorithm, String key, float value)`
-- `setAlgorithmParam(Algorithm algorithm, String key, String value)`
-- `setAlgorithmParam(Algorithm algorithm, String key, Object value)`
-- `updateAlgorithmParams(Algorithm algorithm)`
+Use:
 
-### Miscellaneous
+```java
+int centerX = HuskyLens2.FRAME_WIDTH / 2;
+int centerY = HuskyLens2.FRAME_HEIGHT / 2;
+```
 
-- `setNameByID(Algorithm algorithm, int id, String name)`
-- `setMultiAlgorithm(Algorithm... algorithms)`
-- `setMultiAlgorithmRatio(int... ratios)`
+## References
 
-## Notes on Protocol Behavior
-
-- `RETURN_ARGS` is parsed using the same length-prefixed string layout used by DFRobot's current reference implementations.
-- `takePhoto(int resolution)` is intentionally retained because DFRobot's official V2 reference libraries actively send a resolution payload, even though the protocol markdown is more minimal in that section.
-- Drawing APIs use the official V2 implementation style with a 32-bit RGB color payload.
-- Strings are encoded and decoded as UTF-8 so names and text overlays can safely include Chinese characters.
-
-## Purchase
-This project utilizes hardware and open-source resources provided by DFRobot.
-- DFRobot Official Website: [https://www.dfrobot.com/](https://www.dfrobot.com/)(Applicable to countries and regions other than Chinese Mainland); [https://www.dfrobot.com.cn/](https://www.dfrobot.com.cn/)(Applicable to Chinese Mainland)
-- DFRobot GitHub: [https://github.com/DFRobot/](https://github.com/DFRobot/)
-- **HuskyLens Gen1**
-- Product Page and Purchase Link (Official): [https://www.dfrobot.com/product-1922.html](https://www.dfrobot.com/product-1989.html)(Applicable to countries and regions other than Chinese Mainland); [https://www.dfrobot.com.cn/goods-2050.html](https://www.dfrobot.com.cn/goods-2050.html)(Applicable to Chinese Mainland)
-- Reference Price: 34.9 USD; 249 CNY; 29.9 EUR; 25.9 GBP; 5490 JPY; 47.9 CAD; 48.9 AUD; 279 HKD
-- Documentation: [https://wiki.dfrobot.com/sen0305/](https://wiki.dfrobot.com/sen0305/)(Applicable to countries and regions other than Chinese Mainland); [https://wiki.dfrobot.com.cn/_SKU_SEN0305_Gravity__HUSKYLENS_%E4%BA%BA%E5%B7%A5%E6%99%BA%E8%83%BD%E6%91%84%E5%83%8F%E5%A4%B4](https://wiki.dfrobot.com.cn/_SKU_SEN0305_Gravity__HUSKYLENS_%E4%BA%BA%E5%B7%A5%E6%99%BA%E8%83%BD%E6%91%84%E5%83%8F%E5%A4%B4)(Applicable to Chinese Mainland)
-> HuskyLens Gen1 is an easy-to-use artificial intelligence visual sensor with six major AI functions: facial recognition, object recognition, object tracking, line tracking, color recognition, and label recognition. Adopting high-performance Kendryte K210 AI processor, it runs fast and has high recognition accuracy. The biggest advantage lies in the ease of one click learning, which can complete AI model training without complex algorithm training or code writing. The onboard 2.0-inch IPS display allows for a WYSIWYG debugging process, while providing two communication interfaces: UART and I2C. It can easily connect to mainstream controllers such as Arduino, Raspberry Pi, LattePanda, micro: bit, etc., providing powerful offline visual recognition capabilities for projects such as robots, intelligent access control, and autonomous driving cars.
-
-- **HuskyLens Gen2**
-- Product Page and Purchase Link (Official): [https://www.dfrobot.com/product-2995.html](https://www.dfrobot.com/product-2995.html)(Applicable to countries and regions other than Chinese Mainland); [https://www.dfrobot.com.cn/goods-4198.html](https://www.dfrobot.com.cn/goods-4198.html)(Applicable to Chinese Mainland)
-- Reference Price: 84.9 USD; 499 CNY; 72.9 EUR; 62.9 GBP; 13490 JPY; 115.9 CAD; 118.9 AUD; 669 HKD
-- Documentation: [https://wiki.dfrobot.com/sen0305/](https://wiki.dfrobot.com/sen0305/)(Applicable to countries and regions other than Chinese Mainland); [https://wiki.dfrobot.com.cn/_SKU_SEN0638_Gravity_HUSKYLENS_2_AI_Camera_Vision_Sensor](https://wiki.dfrobot.com.cn/_SKU_SEN0638_Gravity_HUSKYLENS_2_AI_Camera_Vision_Sensor)(Applicable to Chinese Mainland)
-> HuskyLens Gen2 is a simple and easy-to-use AI visual sensor with diverse gameplay. It uses a 6TOPS computing power dedicated AI chip and comes with over 20 pre installed AI models for face recognition, object detection, object classification, pose recognition, instance segmentation, and more. At the same time, users can also deploy self trained models to teach Erha how to recognize any target object through image recognition. Perfectly compatible with mainstream controllers such as Arduino, micro: bit, ESP32, UNIHIKER (M10, K10), control board, Raspberry Pi, etc., providing versatile visual solutions for diverse scenarios such as intelligent robots, industrial automation, education and research.
-
-## Reference Docs Kept in Repository
-
-The following files are intentionally preserved as upstream reference material:
-
-- FTC SDK sample and project readmes shipped with the SDK
-- DFRobot HuskyLens Gen2 protocol and reference implementation readmes under `HuskyLens2_Documents/`
-
-This root README is the single maintained project overview for this repository.
+- DFRobot SEN0638 wiki: https://wiki.dfrobot.com/sen0638/
+- DFRobot HUSKYLENS V2 library: https://github.com/DFRobot/DFRobot_HuskylensV2
+- REV I2C documentation: https://docs.revrobotics.com/duo-control/sensors/i2c
 
 ## License
 
 MIT License
-
-Copyright © 2026 Arthur LIU

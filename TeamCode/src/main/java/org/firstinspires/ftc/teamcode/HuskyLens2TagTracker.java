@@ -8,6 +8,7 @@ import com.qualcomm.robotcore.hardware.Servo;
 import org.firstinspires.ftc.teamcode.huskylens.HuskyLens2;
 import org.firstinspires.ftc.teamcode.huskylens.HuskyLens2.Algorithm;
 import org.firstinspires.ftc.teamcode.huskylens.HuskyLens2.Block;
+import org.firstinspires.ftc.teamcode.huskylens.HuskyLens2.ReadStatus;
 
 import java.util.List;
 
@@ -31,7 +32,8 @@ public class HuskyLens2TagTracker extends LinearOpMode {
     private static final int CENTER_THRESHOLD_PX = 20;
     private static final int LOCK_CONFIRMATION_FRAMES = 3;
     private static final double SHOOTER_POWER = 1.0;
-    private static final long LOOP_DELAY_MS = 40;
+    private static final int POLL_MAX_PACKETS = 2;
+    private static final long POLL_TIME_BUDGET_MS = 4;
 
     private HuskyLens2 huskyLens;
     private Servo turretServo;
@@ -69,9 +71,16 @@ public class HuskyLens2TagTracker extends LinearOpMode {
         telemetry.update();
 
         waitForStart();
+        boolean requestStarted = huskyLens.beginResultRequest(Algorithm.ALGORITHM_TAG_RECOGNITION);
 
         while (opModeIsActive()) {
-            List<Block> tags = huskyLens.requestBlocks(Algorithm.ALGORITHM_TAG_RECOGNITION);
+            if (!requestStarted) {
+                requestStarted = huskyLens.beginResultRequest(Algorithm.ALGORITHM_TAG_RECOGNITION);
+            }
+
+            boolean complete = huskyLens.pollResultRequest(POLL_MAX_PACKETS, POLL_TIME_BUDGET_MS);
+            ReadStatus status = huskyLens.getLastReadStatus();
+            List<Block> tags = huskyLens.getCachedBlocks();
             Block targetTag = chooseClosestToCenter(tags);
 
             if (targetTag == null) {
@@ -113,9 +122,14 @@ public class HuskyLens2TagTracker extends LinearOpMode {
             telemetry.addData("Locked Frames", lockedFrames);
             telemetry.addData("Servo Position", "%.3f", servoPosition);
             telemetry.addData("Threshold Px", CENTER_THRESHOLD_PX);
+            telemetry.addData("Read Status", status);
             telemetry.update();
 
-            sleep(LOOP_DELAY_MS);
+            if (complete || isFinishedStatus(status)) {
+                requestStarted = huskyLens.beginResultRequest(Algorithm.ALGORITHM_TAG_RECOGNITION);
+            }
+
+            idle();
         }
 
         shooterMotor.setPower(0.0);
@@ -145,5 +159,14 @@ public class HuskyLens2TagTracker extends LinearOpMode {
 
     private String emptyAsDash(String value) {
         return value == null || value.isEmpty() ? "-" : value;
+    }
+
+    private boolean isFinishedStatus(ReadStatus status) {
+        return status == ReadStatus.TIMEOUT
+                || status == ReadStatus.TRUNCATED
+                || status == ReadStatus.CHECKSUM_ERROR
+                || status == ReadStatus.MALFORMED_PACKET
+                || status == ReadStatus.PACKET_TOO_LARGE
+                || status == ReadStatus.I2C_ERROR;
     }
 }

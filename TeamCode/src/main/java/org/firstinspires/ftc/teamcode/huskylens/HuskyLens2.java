@@ -1,10 +1,12 @@
 package org.firstinspires.ftc.teamcode.huskylens;
 
 import com.qualcomm.robotcore.hardware.I2cAddr;
+import com.qualcomm.robotcore.hardware.I2cAddrConfig;
 import com.qualcomm.robotcore.hardware.I2cDeviceSynch;
 import com.qualcomm.robotcore.hardware.I2cDeviceSynchDevice;
 import com.qualcomm.robotcore.hardware.configuration.annotations.DeviceProperties;
 import com.qualcomm.robotcore.hardware.configuration.annotations.I2cDeviceType;
+import com.qualcomm.robotcore.util.RobotLog;
 import com.qualcomm.robotcore.util.TypeConversion;
 
 import java.nio.charset.StandardCharsets;
@@ -19,9 +21,10 @@ import java.util.Locale;
         description = "DFRobot HuskyLens Gen2 AI Camera",
         xmlTag = "HuskyLens2"
 )
-public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
+public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> implements I2cAddrConfig {
 
     public static final I2cAddr DEFAULT_ADDRESS = I2cAddr.create7bit(0x50);
+    private static final String TAG = "HuskyLens2";
 
     public static final int FRAME_WIDTH = 640;
     public static final int FRAME_HEIGHT = 480;
@@ -56,9 +59,49 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
     private static final int HEADER_1 = 0xAA;
     private static final int FIXED_DATA_BYTES = 10;
     private static final int MAX_MULTI_ALGORITHMS = 3;
-    private static final int RETRY_COUNT = 3;
-    private static final int RESPONSE_TIMEOUT_MS = 250;
-    private static final int RESPONSE_POLL_INTERVAL_MS = 20;
+    private static final int LYNX_MAX_I2C_READ_BYTES = 100;
+    private static final int DEFAULT_RETRY_COUNT = 2;
+    private static final int PACKET_HEADER_BYTES = 5;
+    private static final int PACKET_CHECKSUM_BYTES = 1;
+
+    public static class Parameters {
+        public I2cAddr i2cAddr = DEFAULT_ADDRESS;
+        public int commandTimeoutMs = 120;
+        public int initializationTimeoutMs = 300;
+        public long defaultPollTimeBudgetMs = 6;
+        public int maxCachedResults = 24;
+        public int maxI2cReadBytes = LYNX_MAX_I2C_READ_BYTES;
+        public int retryCount = DEFAULT_RETRY_COUNT;
+
+        public Parameters() {
+        }
+
+        public Parameters(Parameters other) {
+            if (other == null) {
+                other = new Parameters();
+            }
+            this.i2cAddr = other.i2cAddr;
+            this.commandTimeoutMs = other.commandTimeoutMs;
+            this.initializationTimeoutMs = other.initializationTimeoutMs;
+            this.defaultPollTimeBudgetMs = other.defaultPollTimeBudgetMs;
+            this.maxCachedResults = other.maxCachedResults;
+            this.maxI2cReadBytes = other.maxI2cReadBytes;
+            this.retryCount = other.retryCount;
+        }
+    }
+
+    public enum ReadStatus {
+        IDLE,
+        REQUEST_SENT,
+        IN_PROGRESS,
+        COMPLETE,
+        TIMEOUT,
+        TRUNCATED,
+        CHECKSUM_ERROR,
+        MALFORMED_PACKET,
+        PACKET_TOO_LARGE,
+        I2C_ERROR
+    }
 
     public enum Algorithm {
         ALGORITHM_ANY(0),
@@ -80,7 +123,16 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         ALGORITHM_TAG_RECOGNITION(16),
         ALGORITHM_BARCODE_RECOGNITION(17),
         ALGORITHM_QRCODE_RECOGNITION(18),
-        ALGORITHM_FALLDOWN_RECOGNITION(19);
+        ALGORITHM_FALLDOWN_RECOGNITION(19),
+        ALGORITHM_DEPTH_CAMERA(20),
+        ALGORITHM_DONKEYCAR(21),
+        ALGORITHM_CAMERA(22),
+        ALGORITHM_RFU3(23),
+        ALGORITHM_RFU4(24),
+        ALGORITHM_CUSTOM0(25),
+        ALGORITHM_CUSTOM1(26),
+        ALGORITHM_CUSTOM2(27),
+        ALGORITHM_CUSTOM_BEGIN(128);
 
         public final int id;
 
@@ -207,26 +259,75 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         }
     }
 
+    private static final class Packet {
+        final Command command;
+        final int algorithmId;
+        final byte[] payload;
+
+        Packet(Command command, int algorithmId, byte[] payload) {
+            this.command = command;
+            this.algorithmId = algorithmId;
+            this.payload = payload;
+        }
+    }
+
+    private Parameters parameters = new Parameters();
+    private Info cachedInfo;
+    private final List<Block> cachedBlocks = new ArrayList<>();
+    private final List<Arrow> cachedArrows = new ArrayList<>();
+    private ReadStatus lastReadStatus = ReadStatus.IDLE;
+    private Algorithm pendingResultAlgorithm = Algorithm.ALGORITHM_ANY;
+    private boolean resultRequestActive = false;
+    private boolean resultInfoReceived = false;
+    private boolean resultWasTruncated = false;
+    private int expectedBlocks = 0;
+    private int expectedArrows = 0;
+    private int receivedBlocks = 0;
+    private int receivedArrows = 0;
+    private byte[] receiveBuffer = new byte[0];
+
     public HuskyLens2(I2cDeviceSynch deviceSynch) {
         super(deviceSynch, true);
-        this.deviceClient.setI2cAddress(DEFAULT_ADDRESS);
+        this.deviceClient.setI2cAddress(parameters.i2cAddr);
         super.registerArmingStateCallback(false);
         this.deviceClient.engage();
     }
 
     @Override
-    protected boolean doInitialize() {
-        return knock();
+    protected synchronized boolean doInitialize() {
+        return internalInitialize(parameters, parameters.initializationTimeoutMs);
     }
 
     @Override
     public Manufacturer getManufacturer() {
-        return Manufacturer.Other;
+        return Manufacturer.DFRobot;
     }
 
     @Override
     public String getDeviceName() {
         return "HuskyLens Gen2";
+    }
+
+    public synchronized Parameters getParameters() {
+        return new Parameters(parameters);
+    }
+
+    public synchronized boolean initialize(Parameters parameters) {
+        this.parameters = validateParameters(parameters);
+        this.isInitialized = internalInitialize(this.parameters, this.parameters.initializationTimeoutMs);
+        return this.isInitialized;
+    }
+
+    @Override
+    public synchronized void setI2cAddress(I2cAddr newAddress) {
+        parameters.i2cAddr = newAddress == null ? DEFAULT_ADDRESS : newAddress;
+        deviceClient.setI2cAddress(parameters.i2cAddr);
+        resetResultState(ReadStatus.IDLE);
+    }
+
+    @Override
+    public synchronized I2cAddr getI2cAddress() {
+        return deviceClient.getI2cAddress();
     }
 
     public boolean knock() {
@@ -240,6 +341,9 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
     }
 
     public boolean selectAlgorithm(Algorithm algorithm) {
+        if (algorithm == null) {
+            return false;
+        }
         return selectAlgorithm(algorithm.id);
     }
 
@@ -250,40 +354,84 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
     }
 
     public Info requestInfo(Algorithm algorithm) {
-        return getInfo(algorithm);
+        beginResultRequest(algorithm);
+        pollResultRequestUntilComplete(parameters.commandTimeoutMs, true);
+        return getCachedInfo();
     }
 
     public List<Block> requestBlocks(Algorithm algorithm) {
-        Info info = getInfo(algorithm);
-        if (info == null || info.totalBlocks <= 0) {
-            return Collections.emptyList();
-        }
-
-        List<Block> blocks = new ArrayList<>(info.totalBlocks);
-        for (int i = 0; i < info.totalBlocks; i++) {
-            byte[] blockData = waitForPacket(Command.COMMAND_RETURN_BLOCK);
-            if (blockData != null) {
-                blocks.add(parseBlock(blockData));
-            }
-        }
-        return blocks;
+        beginResultRequest(algorithm);
+        pollResultRequestUntilComplete(parameters.commandTimeoutMs, true);
+        return getCachedBlocks();
     }
 
     public List<Arrow> requestArrows(Algorithm algorithm) {
-        Info info = getInfo(algorithm);
-        int arrowCount = info == null ? 0 : Math.max(0, info.totalResults - info.totalBlocks);
-        if (arrowCount <= 0) {
-            return Collections.emptyList();
+        beginResultRequest(algorithm);
+        pollResultRequestUntilComplete(parameters.commandTimeoutMs, true);
+        return getCachedArrows();
+    }
+
+    public synchronized boolean beginResultRequest(Algorithm algorithm) {
+        resetResultState(ReadStatus.REQUEST_SENT);
+        pendingResultAlgorithm = algorithm == null ? Algorithm.ALGORITHM_ANY : algorithm;
+        resultRequestActive = true;
+        try {
+            deviceClient.write(buildPacket(Command.COMMAND_GET_RESULT, pendingResultAlgorithm, new byte[0]));
+            return true;
+        } catch (RuntimeException exception) {
+            RobotLog.ee(TAG, exception, "Failed to send HuskyLens2 result request");
+            resetResultState(ReadStatus.I2C_ERROR);
+            return false;
+        }
+    }
+
+    public synchronized boolean pollResultRequest(int maxPackets, long maxMillis) {
+        if (!resultRequestActive) {
+            return lastReadStatus == ReadStatus.COMPLETE || lastReadStatus == ReadStatus.TRUNCATED;
         }
 
-        List<Arrow> arrows = new ArrayList<>(arrowCount);
-        for (int i = 0; i < arrowCount; i++) {
-            byte[] arrowData = waitForPacket(Command.COMMAND_RETURN_ARROW);
-            if (arrowData != null) {
-                arrows.add(parseArrow(arrowData));
+        int packetBudget = maxPackets <= 0 ? 1 : maxPackets;
+        long timeBudgetMs = maxMillis <= 0 ? parameters.defaultPollTimeBudgetMs : maxMillis;
+        long deadlineNs = System.nanoTime() + (timeBudgetMs * 1000000L);
+        int packetsProcessed = 0;
+
+        while (resultRequestActive && packetsProcessed < packetBudget) {
+            Packet packet = receivePacket();
+            if (packet == null) {
+                if (isTerminalReadStatus(lastReadStatus)) {
+                    resultRequestActive = false;
+                } else if (lastReadStatus == ReadStatus.REQUEST_SENT) {
+                    lastReadStatus = ReadStatus.IN_PROGRESS;
+                }
+                break;
+            }
+
+            packetsProcessed++;
+            handleResultPacket(packet);
+
+            if (System.nanoTime() >= deadlineNs) {
+                break;
             }
         }
-        return arrows;
+
+        return !resultRequestActive
+                && (lastReadStatus == ReadStatus.COMPLETE || lastReadStatus == ReadStatus.TRUNCATED);
+    }
+
+    public synchronized List<Block> getCachedBlocks() {
+        return new ArrayList<>(cachedBlocks);
+    }
+
+    public synchronized List<Arrow> getCachedArrows() {
+        return new ArrayList<>(cachedArrows);
+    }
+
+    public synchronized Info getCachedInfo() {
+        return cachedInfo == null ? null : copyInfo(cachedInfo);
+    }
+
+    public synchronized ReadStatus getLastReadStatus() {
+        return lastReadStatus;
     }
 
     public int learn(Algorithm algorithm) {
@@ -546,23 +694,148 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         return sendCommand(Command.COMMAND_GET_ALGO_PARAM, algorithm, payload);
     }
 
-    private Info getInfo(Algorithm algorithm) {
-        byte[] response = transact(Command.COMMAND_GET_RESULT, algorithm, new byte[0], Command.COMMAND_RETURN_INFO);
+    private boolean internalInitialize(Parameters parameters, int timeoutMs) {
+        this.parameters = validateParameters(parameters);
+        deviceClient.setI2cAddress(this.parameters.i2cAddr);
+        resetResultState(ReadStatus.IDLE);
+
+        byte[] payload = new byte[FIXED_DATA_BYTES];
+        payload[0] = 0x01;
+        return isSuccessful(sendCommand(
+                Command.COMMAND_KNOCK,
+                Algorithm.ALGORITHM_ANY,
+                payload,
+                timeoutMs
+        ));
+    }
+
+    private Parameters validateParameters(Parameters candidate) {
+        Parameters validated = new Parameters(candidate == null ? new Parameters() : candidate);
+        if (validated.i2cAddr == null) {
+            validated.i2cAddr = DEFAULT_ADDRESS;
+        }
+        validated.commandTimeoutMs = clipInt(validated.commandTimeoutMs, 20, 2000);
+        validated.initializationTimeoutMs = clipInt(validated.initializationTimeoutMs, 20, 3000);
+        validated.defaultPollTimeBudgetMs = clipLong(validated.defaultPollTimeBudgetMs, 1, 100);
+        validated.maxCachedResults = clipInt(validated.maxCachedResults, 1, 128);
+        validated.maxI2cReadBytes = clipInt(
+                validated.maxI2cReadBytes,
+                PACKET_HEADER_BYTES + PACKET_CHECKSUM_BYTES,
+                LYNX_MAX_I2C_READ_BYTES
+        );
+        validated.retryCount = clipInt(validated.retryCount, 1, 5);
+        return validated;
+    }
+
+    private void pollResultRequestUntilComplete(int timeoutMs, boolean requireAllResultPackets) {
+        int packetBudget = Math.max(1, Math.min(parameters.maxCachedResults + 1, 32));
+        long timeBudgetMs = Math.max(1, Math.min(timeoutMs, parameters.commandTimeoutMs));
+        boolean complete = pollResultRequest(packetBudget, timeBudgetMs);
+        if (!complete && requireAllResultPackets && resultRequestActive) {
+            resultRequestActive = false;
+            lastReadStatus = ReadStatus.TIMEOUT;
+        }
+    }
+
+    private void resetResultState(ReadStatus status) {
+        cachedInfo = null;
+        cachedBlocks.clear();
+        cachedArrows.clear();
+        lastReadStatus = status;
+        pendingResultAlgorithm = Algorithm.ALGORITHM_ANY;
+        resultRequestActive = false;
+        resultInfoReceived = false;
+        resultWasTruncated = false;
+        expectedBlocks = 0;
+        expectedArrows = 0;
+        receivedBlocks = 0;
+        receivedArrows = 0;
+        receiveBuffer = new byte[0];
+    }
+
+    private void handleResultPacket(Packet packet) {
+        if (packet.command == Command.COMMAND_RETURN_INFO) {
+            cachedInfo = parseInfo(packet.payload);
+            if (cachedInfo == null) {
+                resultRequestActive = false;
+                lastReadStatus = ReadStatus.MALFORMED_PACKET;
+                return;
+            }
+            resultInfoReceived = true;
+            expectedBlocks = Math.max(0, cachedInfo.totalBlocks);
+            expectedArrows = Math.max(0, cachedInfo.totalResults - cachedInfo.totalBlocks);
+            lastReadStatus = ReadStatus.IN_PROGRESS;
+            finishResultRequestIfDone();
+            return;
+        }
+
+        if (!resultInfoReceived) {
+            lastReadStatus = ReadStatus.IN_PROGRESS;
+            return;
+        }
+
+        if (packet.command == Command.COMMAND_RETURN_BLOCK) {
+            receivedBlocks++;
+            if (canCacheAnotherResult()) {
+                cachedBlocks.add(parseBlock(packet.payload));
+            } else {
+                resultWasTruncated = true;
+            }
+        } else if (packet.command == Command.COMMAND_RETURN_ARROW) {
+            receivedArrows++;
+            if (canCacheAnotherResult()) {
+                cachedArrows.add(parseArrow(packet.payload));
+            } else {
+                resultWasTruncated = true;
+            }
+        }
+
+        finishResultRequestIfDone();
+    }
+
+    private void finishResultRequestIfDone() {
+        if (resultInfoReceived && receivedBlocks >= expectedBlocks && receivedArrows >= expectedArrows) {
+            resultRequestActive = false;
+            lastReadStatus = resultWasTruncated ? ReadStatus.TRUNCATED : ReadStatus.COMPLETE;
+        }
+    }
+
+    private boolean canCacheAnotherResult() {
+        return cachedBlocks.size() + cachedArrows.size() < parameters.maxCachedResults;
+    }
+
+    private Info parseInfo(byte[] response) {
         if (response == null || response.length < FIXED_DATA_BYTES) {
             return null;
         }
 
         Info info = new Info();
         info.maxID = unsignedByte(response[0]);
-        info.totalResults = readShortLE(response, 2);
-        info.totalResultsLearned = readShortLE(response, 4);
-        info.totalBlocks = readShortLE(response, 6);
-        info.totalBlocksLearned = readShortLE(response, 8);
+        info.totalResults = Math.max(0, readShortLE(response, 2));
+        info.totalResultsLearned = Math.max(0, readShortLE(response, 4));
+        info.totalBlocks = Math.max(0, readShortLE(response, 6));
+        info.totalBlocksLearned = Math.max(0, readShortLE(response, 8));
+        if (info.totalBlocks > info.totalResults) {
+            info.totalBlocks = info.totalResults;
+        }
         return info;
+    }
+
+    private Info copyInfo(Info source) {
+        Info copy = new Info();
+        copy.maxID = source.maxID;
+        copy.totalResults = source.totalResults;
+        copy.totalResultsLearned = source.totalResultsLearned;
+        copy.totalBlocks = source.totalBlocks;
+        copy.totalBlocksLearned = source.totalBlocksLearned;
+        return copy;
     }
 
     private Block parseBlock(byte[] data) {
         Block block = new Block();
+        if (data == null || data.length < FIXED_DATA_BYTES) {
+            return block;
+        }
         block.id = unsignedByte(data[0]);
         block.algorithmId = data.length > 1 ? unsignedByte(data[1]) : 0;
         block.algorithm = Algorithm.fromId(block.algorithmId);
@@ -589,6 +862,9 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
 
     private Arrow parseArrow(byte[] data) {
         Arrow arrow = new Arrow();
+        if (data == null || data.length < FIXED_DATA_BYTES) {
+            return arrow;
+        }
         arrow.id = unsignedByte(data[0]);
         arrow.level = data.length > 1 ? unsignedByte(data[1]) : 0;
         arrow.xTarget = readShortLE(data, 2);
@@ -599,31 +875,49 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
     }
 
     private ArgsResponse sendCommand(Command command, Algorithm algorithm, byte[] payload) {
-        byte[] response = transact(command, algorithm, payload, Command.COMMAND_RETURN_ARGS);
+        return sendCommand(command, algorithm, payload, parameters.commandTimeoutMs);
+    }
+
+    private ArgsResponse sendCommand(Command command, Algorithm algorithm, byte[] payload, int timeoutMs) {
+        byte[] response = transact(command, algorithm, payload, Command.COMMAND_RETURN_ARGS, timeoutMs);
         return parseArgsResponse(response);
     }
 
-    private byte[] transact(Command command, Algorithm algorithm, byte[] payload, Command expectedResponse) {
+    private byte[] transact(
+            Command command,
+            Algorithm algorithm,
+            byte[] payload,
+            Command expectedResponse,
+            int timeoutMs
+    ) {
         byte[] packet = buildPacket(command, algorithm, payload);
-        for (int attempt = 0; attempt < RETRY_COUNT; attempt++) {
-            deviceClient.write(packet);
-            byte[] response = waitForPacket(expectedResponse);
-            if (response != null) {
-                return response;
+        for (int attempt = 0; attempt < parameters.retryCount; attempt++) {
+            try {
+                deviceClient.write(packet);
+                Packet response = waitForPacket(expectedResponse, timeoutMs);
+                if (response != null) {
+                    return response.payload;
+                }
+            } catch (RuntimeException exception) {
+                RobotLog.ee(TAG, exception, "HuskyLens2 I2C transaction failed for %s", command);
+                lastReadStatus = ReadStatus.I2C_ERROR;
             }
         }
         return null;
     }
 
-    private byte[] waitForPacket(Command expectedCommand) {
-        long deadlineMs = System.currentTimeMillis() + RESPONSE_TIMEOUT_MS;
-        while (System.currentTimeMillis() <= deadlineMs) {
-            safeSleep(RESPONSE_POLL_INTERVAL_MS);
-            byte[] response = receivePacket(expectedCommand);
-            if (response != null) {
+    private Packet waitForPacket(Command expectedCommand, int timeoutMs) {
+        int readAttempts = Math.max(1, Math.min(32, (Math.max(1, timeoutMs) / 5) + 1));
+        for (int attempt = 0; attempt < readAttempts; attempt++) {
+            Packet response = receivePacket();
+            if (response != null && response.command == expectedCommand) {
                 return response;
             }
+            if (isTerminalReadStatus(lastReadStatus)) {
+                return null;
+            }
         }
+        lastReadStatus = ReadStatus.TIMEOUT;
         return null;
     }
 
@@ -675,11 +969,15 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
     }
 
     private byte[] buildPacket(Command command, Algorithm algorithm, byte[] data) {
+        Algorithm packetAlgorithm = algorithm == null ? Algorithm.ALGORITHM_ANY : algorithm;
+        if (data == null) {
+            data = new byte[0];
+        }
         byte[] packet = new byte[5 + data.length + 1];
         packet[0] = (byte) HEADER_0;
         packet[1] = (byte) HEADER_1;
         packet[2] = (byte) command.id;
-        packet[3] = (byte) algorithm.id;
+        packet[3] = (byte) packetAlgorithm.id;
         packet[4] = (byte) data.length;
         System.arraycopy(data, 0, packet, 5, data.length);
 
@@ -691,42 +989,173 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         return packet;
     }
 
-    private byte[] receivePacket(Command expectedCommand) {
-        byte[] header = deviceClient.read(5);
-        if (header.length < 5) {
-            return null;
+    private Packet receivePacket() {
+        Packet bufferedPacket = parseBufferedPacket();
+        if (bufferedPacket != null || isTerminalReadStatus(lastReadStatus)) {
+            return bufferedPacket;
         }
-        if (unsignedByte(header[0]) != HEADER_0 || unsignedByte(header[1]) != HEADER_1) {
-            return null;
-        }
-        if (unsignedByte(header[2]) != expectedCommand.id) {
+
+        byte[] chunk = readChunkFromDevice();
+        if (chunk == null || chunk.length == 0) {
+            if (lastReadStatus != ReadStatus.I2C_ERROR) {
+                lastReadStatus = ReadStatus.IN_PROGRESS;
+            }
             return null;
         }
 
-        int dataLength = unsignedByte(header[4]);
-        byte[] payloadAndChecksum = deviceClient.read(dataLength + 1);
-        if (payloadAndChecksum.length < dataLength + 1) {
+        if (!isBlank(chunk)) {
+            appendToReceiveBuffer(chunk);
+        }
+        return parseBufferedPacket();
+    }
+
+    private Packet parseBufferedPacket() {
+        if (!alignReceiveBufferToHeader()) {
+            return null;
+        }
+        if (receiveBuffer.length < PACKET_HEADER_BYTES) {
+            lastReadStatus = ReadStatus.IN_PROGRESS;
+            return null;
+        }
+
+        int dataLength = unsignedByte(receiveBuffer[4]);
+        int packetLength = PACKET_HEADER_BYTES + dataLength + PACKET_CHECKSUM_BYTES;
+        if (packetLength > parameters.maxI2cReadBytes) {
+            discardReceiveBuffer(receiveBuffer.length);
+            lastReadStatus = ReadStatus.PACKET_TOO_LARGE;
+            return null;
+        }
+        if (receiveBuffer.length < packetLength) {
+            lastReadStatus = ReadStatus.IN_PROGRESS;
+            return null;
+        }
+
+        Command command = commandFromId(unsignedByte(receiveBuffer[2]));
+        if (command == null) {
+            discardReceiveBuffer(packetLength);
+            lastReadStatus = ReadStatus.MALFORMED_PACKET;
             return null;
         }
 
         int checksum = 0;
-        for (byte value : header) {
-            checksum += unsignedByte(value);
+        for (int i = 0; i < packetLength - PACKET_CHECKSUM_BYTES; i++) {
+            checksum += unsignedByte(receiveBuffer[i]);
         }
-        for (int i = 0; i < dataLength; i++) {
-            checksum += unsignedByte(payloadAndChecksum[i]);
-        }
-        if ((checksum & 0xFF) != unsignedByte(payloadAndChecksum[dataLength])) {
+        if ((checksum & 0xFF) != unsignedByte(receiveBuffer[packetLength - 1])) {
+            discardReceiveBuffer(packetLength);
+            lastReadStatus = ReadStatus.CHECKSUM_ERROR;
             return null;
         }
 
+        int algorithmId = unsignedByte(receiveBuffer[3]);
         byte[] payload = new byte[dataLength];
-        System.arraycopy(payloadAndChecksum, 0, payload, 0, dataLength);
-        return payload;
+        System.arraycopy(receiveBuffer, PACKET_HEADER_BYTES, payload, 0, dataLength);
+        discardReceiveBuffer(packetLength);
+        return new Packet(command, algorithmId, payload);
+    }
+
+    private byte[] readChunkFromDevice() {
+        int readLength = clipInt(parameters.maxI2cReadBytes, PACKET_HEADER_BYTES + PACKET_CHECKSUM_BYTES, LYNX_MAX_I2C_READ_BYTES);
+        try {
+            return deviceClient.read(readLength);
+        } catch (RuntimeException exception) {
+            RobotLog.ee(TAG, exception, "HuskyLens2 I2C read failed");
+            lastReadStatus = ReadStatus.I2C_ERROR;
+            return null;
+        }
+    }
+
+    private void appendToReceiveBuffer(byte[] chunk) {
+        int oldLength = receiveBuffer.length;
+        byte[] combined = new byte[oldLength + chunk.length];
+        System.arraycopy(receiveBuffer, 0, combined, 0, oldLength);
+        System.arraycopy(chunk, 0, combined, oldLength, chunk.length);
+        receiveBuffer = combined;
+    }
+
+    private boolean alignReceiveBufferToHeader() {
+        if (receiveBuffer.length == 0) {
+            lastReadStatus = ReadStatus.IN_PROGRESS;
+            return false;
+        }
+
+        int headerIndex = findHeaderIndex();
+        if (headerIndex < 0) {
+            boolean keepTrailingHeaderStart = unsignedByte(receiveBuffer[receiveBuffer.length - 1]) == HEADER_0;
+            byte[] nextBuffer = keepTrailingHeaderStart ? new byte[] { receiveBuffer[receiveBuffer.length - 1] } : new byte[0];
+            receiveBuffer = nextBuffer;
+            lastReadStatus = ReadStatus.IN_PROGRESS;
+            return false;
+        }
+
+        if (headerIndex > 0) {
+            discardReceiveBuffer(headerIndex);
+        }
+        return true;
+    }
+
+    private int findHeaderIndex() {
+        for (int i = 0; i < receiveBuffer.length - 1; i++) {
+            if (unsignedByte(receiveBuffer[i]) == HEADER_0 && unsignedByte(receiveBuffer[i + 1]) == HEADER_1) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private void discardReceiveBuffer(int byteCount) {
+        if (byteCount <= 0) {
+            return;
+        }
+        if (byteCount >= receiveBuffer.length) {
+            receiveBuffer = new byte[0];
+            return;
+        }
+
+        int remaining = receiveBuffer.length - byteCount;
+        byte[] trimmed = new byte[remaining];
+        System.arraycopy(receiveBuffer, byteCount, trimmed, 0, remaining);
+        receiveBuffer = trimmed;
+    }
+
+    private boolean isTerminalReadStatus(ReadStatus status) {
+        return status == ReadStatus.CHECKSUM_ERROR
+                || status == ReadStatus.MALFORMED_PACKET
+                || status == ReadStatus.PACKET_TOO_LARGE
+                || status == ReadStatus.I2C_ERROR;
+    }
+
+    private Command commandFromId(int id) {
+        for (Command command : Command.values()) {
+            if (command.id == id) {
+                return command;
+            }
+        }
+        return null;
+    }
+
+    private boolean isBlank(byte[] data) {
+        if (data == null) {
+            return true;
+        }
+        for (byte value : data) {
+            if (value != 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private int unsignedByte(byte value) {
         return TypeConversion.unsignedByteToInt(value);
+    }
+
+    private int clipInt(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private long clipLong(long value, long min, long max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     private int readShortLE(byte[] data, int offset) {
@@ -743,14 +1172,6 @@ public class HuskyLens2 extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         data[offset + 1] = (byte) ((value >> 8) & 0xFF);
         data[offset + 2] = (byte) ((value >> 16) & 0xFF);
         data[offset + 3] = (byte) ((value >> 24) & 0xFF);
-    }
-
-    private void safeSleep(long millis) {
-        try {
-            Thread.sleep(millis);
-        } catch (InterruptedException interruptedException) {
-            Thread.currentThread().interrupt();
-        }
     }
 
     private StringResult readLengthPrefixedString(byte[] data, int offset) {
