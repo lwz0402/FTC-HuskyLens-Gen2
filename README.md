@@ -8,6 +8,11 @@ This repository keeps the HuskyLens Gen2 work intentionally small and FTC-friend
 - One full API teaching sample: `TeamCode/src/main/java/org/firstinspires/ftc/teamcode/huskylens/HuskyLens2MasterSample.java`
 - One practical tag tracker sample: `TeamCode/src/main/java/org/firstinspires/ftc/teamcode/HuskyLens2TagTracker.java`
 
+## Project Info
+
+- HUSKYLENS 2 purchase page: https://www.dfrobot.com/product-2995.html
+- Library author: Arthur LIU from FTC teams 25787 & 27570
+
 ## Hardware Setup
 
 1. Connect HUSKYLENS 2 to a REV Control Hub I2C port.
